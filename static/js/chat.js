@@ -75,32 +75,32 @@ class RoomChat {
 
         if (msg.type === 'system') {
             el.innerHTML = `
-                <div class="flex items-center justify-center my-0.5">
-                    <span class="chat-system-pill text-[11px] font-medium px-3 py-1 rounded-full text-center leading-snug max-w-[92%]">
+                <div class="flex items-center justify-center my-0.5 min-w-0">
+                    <span class="chat-system-pill text-[11px] font-medium px-3 py-1 rounded-2xl text-center leading-snug max-w-[92%] break-words [overflow-wrap:anywhere]">
                         ${this.escapeHtml(msg.text)}
                     </span>
                 </div>
             `;
         } else {
             const hostBadge = msg.is_host
-                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-bold">👑 Host</span>`
+                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-bold flex-shrink-0">👑 Host</span>`
                 : '';
 
             el.innerHTML = `
-                <div class="flex items-end gap-2 ${isMe ? 'flex-row-reverse' : ''}">
+                <div class="flex items-end gap-2 min-w-0 ${isMe ? 'flex-row-reverse' : ''}">
                     <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm shadow-sm flex-shrink-0"
                          style="background-color: ${msg.user_color || '#6366f1'}22; border: 1.5px solid ${msg.user_color || '#6366f1'}88">
                         ${msg.user_avatar || '🎧'}
                     </div>
-                    <div class="max-w-[78%] flex flex-col ${isMe ? 'items-end' : 'items-start'}">
-                        <div class="flex items-center gap-1.5 mb-1 px-1 text-[11px]">
-                            <span class="font-semibold" style="color: ${msg.user_color || 'var(--accent-primary)'}">
+                    <div class="max-w-[78%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}">
+                        <div class="flex items-center gap-1.5 mb-1 px-1 text-[11px] max-w-full">
+                            <span class="font-semibold truncate" style="color: ${msg.user_color || 'var(--accent-primary)'}">
                                 ${this.escapeHtml(msg.user_name || 'Khách')}
                             </span>
                             ${hostBadge}
-                            <span class="text-[10px] text-dim font-mono-num">${timeStr}</span>
+                            <span class="text-[10px] text-dim font-mono-num flex-shrink-0">${timeStr}</span>
                         </div>
-                        <div class="rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed break-words shadow-sm ${
+                        <div class="rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed max-w-full break-words [overflow-wrap:anywhere] shadow-sm ${
                             isMe
                                 ? 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-br-sm'
                                 : 'chat-bubble-other rounded-bl-sm'
@@ -114,7 +114,8 @@ class RoomChat {
 
         this.container.appendChild(el);
 
-        if (!this.isUserScrolledUp || isHistory) {
+        if (!this.isUserScrolledUp || isHistory || isMe) {
+            this.isUserScrolledUp = false;
             this.scrollToBottom();
         }
 
@@ -126,10 +127,16 @@ class RoomChat {
     scrollToBottom() {
         if (this.container) {
             this.container.scrollTop = this.container.scrollHeight;
+            requestAnimationFrame(() => {
+                if (this.container) {
+                    this.container.scrollTop = this.container.scrollHeight;
+                }
+            });
         }
     }
 
     clear() {
+        this.isUserScrolledUp = false;
         if (this.container) {
             this.container.innerHTML = '';
         }

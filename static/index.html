@@ -223,7 +223,7 @@
     <!-- ===================================================================== -->
     <!-- 2. ROOM VIEW (Phòng Nghe Nhạc, Realtime Search & Chat) -->
     <!-- ===================================================================== -->
-    <div id="room-view" class="hidden relative z-10 flex-1 flex flex-col h-screen overflow-hidden">
+    <div id="room-view" class="hidden fixed inset-0 z-10 flex flex-col h-[100dvh] max-h-[100dvh] overflow-hidden">
 
         <!-- TOP STUDIO HEADER WITH SPOTLIGHT REALTIME SEARCH -->
         <header class="surface-card border-b border-theme px-3 md:px-5 py-2.5 flex-shrink-0 z-40">
@@ -334,7 +334,7 @@
         <div class="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
 
             <!-- LEFT / CENTER COLUMN -->
-            <div class="flex-1 overflow-y-auto p-3.5 md:p-5 lg:p-6 space-y-5">
+            <div class="flex-1 min-h-0 overflow-y-auto p-3.5 md:p-5 lg:p-6 space-y-5">
 
                 <!-- NOW PLAYING STAGE CARD -->
                 <section class="surface-card rounded-3xl p-4 md:p-5 overflow-hidden">
@@ -584,10 +584,10 @@
             </div>
 
             <!-- RIGHT SIDEBAR: REALTIME CHAT & MEMBERS -->
-            <aside class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[420px] lg:h-auto lg:self-stretch min-h-0 z-20">
+            <aside class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[42vh] lg:h-full min-h-0 overflow-hidden z-20">
 
                 <!-- Segmented Sidebar Tabs -->
-                <div class="p-3 border-b border-theme flex items-center justify-between">
+                <div class="p-3 border-b border-theme flex items-center justify-between flex-shrink-0">
                     <div class="segmented-track p-1 rounded-xl grid grid-cols-2 w-full gap-1">
                         <button type="button" id="tab-btn-chat" class="segmented-btn active py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
@@ -601,11 +601,11 @@
                 </div>
 
                 <!-- CHAT PANE -->
-                <div id="tab-pane-chat" class="flex-1 flex flex-col overflow-hidden">
-                    <div id="chat-messages-container" class="flex-1 overflow-y-auto p-3.5 space-y-1"></div>
+                <div id="tab-pane-chat" class="flex-1 min-h-0 flex flex-col overflow-hidden">
+                    <div id="chat-messages-container" class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3.5 space-y-1"></div>
 
                     <!-- Tactile Floating Reaction Bar -->
-                    <div class="px-3 py-2 border-t border-theme flex items-center justify-between gap-1 overflow-x-auto no-scrollbar">
+                    <div class="px-3 py-2 border-t border-theme flex items-center justify-between gap-1 overflow-x-auto no-scrollbar flex-shrink-0">
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="❤️" title="Thả tim">❤️</button>
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🔥" title="Quá cháy">🔥</button>
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🎵" title="Nhạc hay">🎵</button>
@@ -617,7 +617,7 @@
                     </div>
 
                     <!-- Chat Composer -->
-                    <form id="chat-input-form" class="p-3 border-t border-theme">
+                    <form id="chat-input-form" class="p-3 border-t border-theme flex-shrink-0">
                         <div class="relative flex items-center gap-2">
                             <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
                                 class="input-field flex-1 pl-4 pr-11 py-2.5 rounded-full text-xs md:text-sm"
@@ -632,7 +632,7 @@
                 </div>
 
                 <!-- MEMBERS PANE -->
-                <div id="tab-pane-members" class="hidden flex-1 overflow-y-auto p-3.5">
+                <div id="tab-pane-members" class="hidden flex-1 min-h-0 overflow-y-auto p-3.5">
                     <div id="room-members-list" class="space-y-2"></div>
                 </div>
 
