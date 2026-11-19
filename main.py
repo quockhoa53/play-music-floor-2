@@ -310,6 +310,9 @@ class Room:
         # Ended reports for unknown-duration tracks (tied to current_track.uid)
         self.ended_reports: Set[str] = set()
 
+        # Fair majority skip votes (>= 50% of active room members, Anti-Sybil)
+        self.skip_votes: Set[str] = set()
+
         # Active song priority vote request (1 per room at a time, majority >= 50%)
         self.priority_request: Optional[Dict] = None
 
@@ -352,15 +355,39 @@ class Room:
             return self.current_time + elapsed
         return self.current_time
 
+    @staticmethod
+    def _calc_majority_needed(total: int) -> int:
+        if total <= 1:
+            return 1
+        return max(2, (total + 1) // 2)
+
+    def get_skip_stats(self) -> Tuple[int, int, List[str]]:
+        """Anti-Sybil majority skip vote calculation (>= 50% of active room members, min 2 when >= 2 members)."""
+        active_voters = [uid for uid in self.skip_votes if uid in self.users]
+        distinct_ips = {u.client_ip for u in self.users.values()}
+
+        if len(distinct_ips) > 1:
+            voter_ips = {self.users[uid].client_ip for uid in active_voters}
+            count = len(voter_ips)
+            needed = self._calc_majority_needed(len(distinct_ips))
+        else:
+            count = len(active_voters)
+            needed = self._calc_majority_needed(len(self.users))
+
+        return count, needed, active_voters
+
+    def get_skip_state(self) -> Dict:
+        count, needed, active_voters = self.get_skip_stats()
+        return {
+            "count": count,
+            "needed": needed,
+            "voted_users": active_voters,
+        }
+
     def get_priority_stats(self) -> Tuple[int, int, List[str]]:
         """Anti-Sybil majority vote calculation (>= 50% of active room members, min 2 when >= 2 members)."""
-        def _calc_needed(total: int) -> int:
-            if total <= 1:
-                return 1
-            return max(2, (total + 1) // 2)
-
         if not self.priority_request:
-            return 0, _calc_needed(len(self.users)), []
+            return 0, self._calc_majority_needed(len(self.users)), []
 
         active_voters = [uid for uid in self.priority_request["votes"] if uid in self.users]
         distinct_ips = {u.client_ip for u in self.users.values()}
@@ -369,11 +396,11 @@ class Room:
             # Multi-IP production room: 1 IP = max 1 vote to prevent Sybil tab stuffing
             voter_ips = {self.users[uid].client_ip for uid in active_voters}
             count = len(voter_ips)
-            needed = _calc_needed(len(distinct_ips))
+            needed = self._calc_majority_needed(len(distinct_ips))
         else:
             # Single-IP room (local dev / same LAN): 1 authenticated session = 1 vote
             count = len(active_voters)
-            needed = _calc_needed(len(self.users))
+            needed = self._calc_majority_needed(len(self.users))
 
         return count, needed, active_voters
 
@@ -436,6 +463,7 @@ class Room:
             "history": [t.to_dict() for t in self.history[-10:]],
             "users": [u.to_dict(self.host_id) for u in self.users.values()],
             "user_count": len(self.users),
+            "skip_vote": self.get_skip_state(),
             "priority_request": self.get_priority_state(),
         }
         if include_invite and self.is_private:
@@ -492,6 +520,7 @@ class Room:
                 self.history.pop(0)
 
         self.ended_reports.clear()
+        self.skip_votes.clear()
         self.state_version += 1
 
         if self.queue:
@@ -1136,6 +1165,7 @@ async def websocket_room_endpoint(
 
                     users_snapshot = [u.to_dict(room.host_id) for u in room.users.values()]
                     host_snapshot = room.host_id
+                    skip_snapshot = room.get_skip_state()
                     priority_snapshot = room.get_priority_state()
                     invalidate_rooms_cache()
 
@@ -1146,6 +1176,7 @@ async def websocket_room_endpoint(
                     "users": users_snapshot,
                     "message": join_msg,
                     "host_id": host_snapshot,
+                    "skip_vote": skip_snapshot,
                     "priority_request": priority_snapshot,
                 })
 
@@ -1272,6 +1303,7 @@ async def websocket_room_endpoint(
                         room.current_time = 0.0
                         room.updated_at = time.time()
                         room.ended_reports.clear()
+                        room.skip_votes.clear()
 
                         sys_msg = {
                             "id": secrets.token_hex(4),
@@ -1290,6 +1322,7 @@ async def websocket_room_endpoint(
                             "current_time": room.current_time,
                             "updated_at": room.updated_at,
                             "queue": [t.to_dict() for t in room.queue],
+                            "skip_vote": room.get_skip_state(),
                             "priority_request": room.get_priority_state(),
                             "message": sys_msg,
                         }
@@ -1507,6 +1540,7 @@ async def websocket_room_endpoint(
                             "updated_at": room.updated_at,
                             "queue": [t.to_dict() for t in room.queue],
                             "history": [t.to_dict() for t in room.history[-10:]],
+                            "skip_vote": room.get_skip_state(),
                             "priority_request": room.get_priority_state(),
                             "message": sys_msg,
                         }
@@ -1664,7 +1698,90 @@ async def websocket_room_endpoint(
                     await room.broadcast(payload)
 
             # ----------------------------------------------------------------
-            # 10. TOGGLE DJ MODE (HOST ONLY + LOCKED)
+            # 10. FAIR MAJORITY SKIP VOTE (>= 50% OF MEMBERS, ANTI-SYBIL)
+            # ----------------------------------------------------------------
+            elif action == "vote_skip":
+                allowed, _ = rate_limiter.allow(f"ws_skip:{user_id}", limit=8, window_sec=15)
+                if not allowed:
+                    await websocket.send_json({"type": "error", "message": "Bạn bình chọn qua bài quá nhanh!"})
+                    continue
+
+                if not current_user:
+                    continue
+
+                payload = None
+                err_msg = None
+                async with room.lock:
+                    ct = room.current_track
+                    if not ct:
+                        err_msg = "Hiện chưa có bài hát nào đang phát"
+                    else:
+                        had_votes_before = len(room.skip_votes) > 0
+                        if user_id in room.skip_votes:
+                            room.skip_votes.remove(user_id)
+                        else:
+                            room.skip_votes.add(user_id)
+
+                        count, needed, _ = room.get_skip_stats()
+                        if count >= needed:
+                            finished_track_dict = ct.to_dict()
+                            next_t = room.advance_track()
+                            sys_msg = {
+                                "id": secrets.token_hex(4),
+                                "type": "system",
+                                "text": (
+                                    f"⏭️ Đã đủ {needed}/{needed} phiếu bỏ qua! Chuyển sang bài: {next_t.title}"
+                                    if next_t
+                                    else f"⏭️ Đã đủ {needed}/{needed} phiếu bỏ qua bài \"{ct.title}\". Hàng đợi hiện đang trống."
+                                ),
+                                "timestamp": time.time(),
+                            }
+                            room.messages.append(sys_msg)
+                            if len(room.messages) > 100:
+                                room.messages.pop(0)
+                            payload = {
+                                "type": "playback_changed",
+                                "current_track": next_t.to_dict() if next_t else None,
+                                "status": room.status,
+                                "current_time": 0.0,
+                                "updated_at": room.updated_at,
+                                "queue": [t.to_dict() for t in room.queue],
+                                "history": [t.to_dict() for t in room.history[-10:]],
+                                "skip_vote": room.get_skip_state(),
+                                "priority_request": room.get_priority_state(),
+                                "message": sys_msg,
+                            }
+                            invalidate_rooms_cache()
+                            db.schedule_add_history(room.id, finished_track_dict)
+                            db.schedule_save_room(room.to_db_record())
+                            db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
+                            db.schedule_add_message(room.id, sys_msg)
+                        else:
+                            sys_msg = None
+                            if not had_votes_before and count > 0:
+                                sys_msg = {
+                                    "id": secrets.token_hex(4),
+                                    "type": "system",
+                                    "text": f"⏭️ {current_user.name} đề xuất qua bài \"{ct.title}\" ({count}/{needed} phiếu). Mọi người cùng vote nhé!",
+                                    "timestamp": time.time(),
+                                }
+                                room.messages.append(sys_msg)
+                                if len(room.messages) > 100:
+                                    room.messages.pop(0)
+                                db.schedule_add_message(room.id, sys_msg)
+                            payload = {
+                                "type": "skip_vote_updated",
+                                "skip_vote": room.get_skip_state(),
+                                "message": sys_msg,
+                            }
+
+                if err_msg:
+                    await websocket.send_json({"type": "error", "message": err_msg})
+                elif payload:
+                    await room.broadcast(payload)
+
+            # ----------------------------------------------------------------
+            # 11. TOGGLE DJ MODE (HOST ONLY + LOCKED)
             # ----------------------------------------------------------------
             elif action == "toggle_dj_mode":
                 async with room.lock:
@@ -1706,6 +1823,7 @@ async def websocket_room_endpoint(
                 if user_id in room.users:
                     leaving_user = room.users.pop(user_id)
                     room.ended_reports.discard(user_id)
+                    room.skip_votes.discard(user_id)
                     if room.priority_request:
                         room.priority_request["votes"].discard(user_id)
                         if not any(uid in room.users for uid in room.priority_request["votes"]):
@@ -1740,6 +1858,7 @@ async def websocket_room_endpoint(
                         "user_id": user_id,
                         "users": [u.to_dict(room.host_id) for u in room.users.values()],
                         "host_id": room.host_id,
+                        "skip_vote": room.get_skip_state(),
                         "priority_request": room.get_priority_state(),
                         "message": leave_msg,
                     }

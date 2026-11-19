@@ -132,8 +132,8 @@ def test_http_headers_ui_and_media_endpoints():
     assert "emoji-picker-popover" in r_index.text
     assert "gif-picker-popover" in r_index.text
     assert "chat-image-file-input" in r_index.text
-    # Skip buttons must be removed
-    assert "btn-vote-skip" not in r_index.text
+    # Majority skip vote button present; unilateral Host force-skip must NOT exist
+    assert "btn-vote-skip" in r_index.text
     assert "btn-force-skip" not in r_index.text
 
     for asset in (
@@ -761,6 +761,80 @@ def test_keep_alive_scheduler():
     print("[OK] Keep-alive server wake-up URL precedence & peer targets")
 
 
+def test_skip_vote_majority_and_anti_sybil():
+    client = TestClient(app)
+    rate_limiter._buckets.clear()
+    ddos_guard.reset()
+
+    s1 = client.post("/api/session").json()
+    s2 = client.post("/api/session").json()
+    s3 = client.post("/api/session").json()
+    tok1, uid1 = s1["token"], s1["user_id"]
+    tok2, uid2 = s2["token"], s2["user_id"]
+    tok3, uid3 = s3["token"], s3["user_id"]
+
+    cr = client.post(
+        "/api/rooms",
+        headers={"X-Session-Token": tok1},
+        json={"name": "Skip Vote Test Room"},
+    )
+    assert cr.status_code == 200
+    rid = cr.json()["room_id"]
+    room = rooms[rid]
+
+    t_now = Track("FN7ALfpGxiI", "Now Playing", "A", 200, "03:20", uid1, "U1")
+    t_next = Track("SlQR9iu09bQ", "Next Up", "B", 200, "03:20", uid2, "U2")
+    room.current_track = t_now
+    room.status = "playing"
+    room.queue = [t_next]
+
+    # 3 active users on 3 distinct IPs -> needed = 2
+    room.host_id = uid1
+    room.users[uid1] = User(uid1, "Host U1", "🎧", "#4f46e5", client_ip="10.1.0.1")
+    room.users[uid2] = User(uid2, "Member U2", "🦊", "#ec4899", client_ip="10.1.0.2")
+    room.users[uid3] = User(uid3, "Member U3", "🐼", "#10b981", client_ip="10.1.0.3")
+
+    # 1. Even Host voting alone gets 1/2 and does NOT skip unilaterally!
+    with client.websocket_connect(f"/ws/{rid}?token={tok1}") as ws1:
+        ws1.send_json({"action": "join", "name": "Host U1"})
+        ws1.receive_json()  # init_state
+        ws1.receive_json()  # user_joined
+        room.users[uid1].client_ip = "10.1.0.1"
+
+        ws1.send_json({"action": "vote_skip"})
+        sv = ws1.receive_json()
+        assert sv["type"] == "skip_vote_updated"
+        assert sv["skip_vote"]["count"] == 1
+        assert sv["skip_vote"]["needed"] == 2
+        assert room.current_track.uid == t_now.uid
+
+    # Re-pin U1 with vote intact and test Anti-Sybil (extra tab same IP still 1/2)
+    room.users[uid1] = User(uid1, "Host U1", "🎧", "#4f46e5", client_ip="10.1.0.1")
+    room.skip_votes = {uid1}
+    room.users["u_sybil"] = User("u_sybil", "Sybil", "🐱", "#6366f1", client_ip="10.1.0.1")
+    room.skip_votes.add("u_sybil")
+    cnt, needed, _ = room.get_skip_stats()
+    assert cnt == 1 and needed == 2, f"Anti-Sybil skip failed: {cnt}/{needed}"
+    room.users.pop("u_sybil", None)
+    room.skip_votes.discard("u_sybil")
+
+    # 2. Member U2 (distinct IP) votes -> reaches 2/2 and advances to t_next!
+    with client.websocket_connect(f"/ws/{rid}?token={tok2}") as ws2:
+        ws2.send_json({"action": "join", "name": "Member U2"})
+        ws2.receive_json()
+        ws2.receive_json()
+        room.users[uid2].client_ip = "10.1.0.2"
+
+        ws2.send_json({"action": "vote_skip"})
+        pc = ws2.receive_json()
+        assert pc["type"] == "playback_changed"
+        assert pc["current_track"]["uid"] == t_next.uid
+        assert pc["skip_vote"]["count"] == 0
+        assert len(room.history) == 1 and room.history[0].uid == t_now.uid
+
+    print("[OK] Fair majority skip vote (>=50%), no Host override & Anti-Sybil")
+
+
 if __name__ == "__main__":
     try:
         rate_limiter._buckets.clear()
@@ -775,6 +849,7 @@ if __name__ == "__main__":
         test_song_priority_request_and_majority_vote()
         test_ddos_guard_protection()
         test_keep_alive_scheduler()
+        test_skip_vote_majority_and_anti_sybil()
         print("ALL TESTS PASSED!")
     finally:
         db.close()

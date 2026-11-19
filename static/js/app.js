@@ -978,11 +978,15 @@ function initSocketEvents() {
         window.appState.roomData.updated_at = data.updated_at;
         window.appState.roomData.queue = data.queue || [];
         if (data.history) window.appState.roomData.history = data.history;
+        if ('skip_vote' in data) {
+            window.appState.roomData.skip_vote = data.skip_vote;
+        }
         if ('priority_request' in data) {
             window.appState.roomData.priority_request = data.priority_request;
         }
 
         window.syncPlayer.syncWithRoomState(window.appState.roomData);
+        renderSkipVoteButton(window.appState.roomData.skip_vote);
         renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
         renderHistory();
@@ -1020,6 +1024,14 @@ function initSocketEvents() {
         if (data.message) window.roomChat.addMessage(data.message);
     });
 
+    socket.on('skip_vote_updated', (data) => {
+        if (!window.appState.roomData) return;
+        window.appState.roomData.skip_vote = data.skip_vote || { count: 0, needed: 1, voted_users: [] };
+        renderSkipVoteButton(window.appState.roomData.skip_vote);
+
+        if (data.message) window.roomChat.addMessage(data.message);
+    });
+
     socket.on('chat', (data) => {
         window.roomChat.addMessage(data.message);
     });
@@ -1033,6 +1045,10 @@ function initSocketEvents() {
             window.appState.roomData.users = data.users;
             window.appState.roomData.host_id = data.host_id;
             window.appState.isHost = (data.host_id === window.appState.userId);
+            if ('skip_vote' in data) {
+                window.appState.roomData.skip_vote = data.skip_vote;
+                renderSkipVoteButton(window.appState.roomData.skip_vote);
+            }
             if ('priority_request' in data) {
                 window.appState.roomData.priority_request = data.priority_request;
                 renderPriorityBanner(window.appState.roomData.priority_request);
@@ -1048,6 +1064,10 @@ function initSocketEvents() {
             window.appState.roomData.users = data.users;
             window.appState.roomData.host_id = data.host_id;
             window.appState.isHost = (data.host_id === window.appState.userId);
+            if ('skip_vote' in data) {
+                window.appState.roomData.skip_vote = data.skip_vote;
+                renderSkipVoteButton(window.appState.roomData.skip_vote);
+            }
             if ('priority_request' in data) {
                 window.appState.roomData.priority_request = data.priority_request;
                 renderPriorityBanner(window.appState.roomData.priority_request);
@@ -1123,10 +1143,44 @@ function updateRoomUI(room) {
     if (privBadge) privBadge.classList.toggle('hidden', !room.is_private);
 
     updateHostControls();
+    renderSkipVoteButton(room.skip_vote || null);
     renderPriorityBanner(room.priority_request || null);
     renderQueue();
     renderHistory();
     renderMembers();
+}
+
+function renderSkipVoteButton(skipVote) {
+    const btn = document.getElementById('btn-vote-skip');
+    const labelEl = document.getElementById('skip-vote-label');
+    const countEl = document.getElementById('skip-vote-count');
+    if (!btn) return;
+
+    const hasTrack = !!(window.appState.roomData && window.appState.roomData.current_track);
+    const count = Number((skipVote && skipVote.count) || 0);
+    const needed = Math.max(1, Number((skipVote && skipVote.needed) || 1));
+    const myUid = window.appState.userId;
+    const hasVoted = !!(skipVote && Array.isArray(skipVote.voted_users) && skipVote.voted_users.includes(myUid));
+
+    btn.disabled = !hasTrack;
+    btn.classList.toggle('opacity-50', !hasTrack);
+    btn.classList.toggle('cursor-not-allowed', !hasTrack);
+
+    if (hasVoted && hasTrack) {
+        btn.classList.add('border-rose-500/40', 'bg-rose-500/15', 'text-rose-600', 'dark:text-rose-300');
+        btn.classList.remove('text-main');
+        if (labelEl) labelEl.textContent = '✓ Đã vote qua bài';
+        btn.title = 'Bấm lại để rút phiếu bỏ qua bài';
+    } else {
+        btn.classList.remove('border-rose-500/40', 'bg-rose-500/15', 'text-rose-600', 'dark:text-rose-300');
+        btn.classList.add('text-main');
+        if (labelEl) labelEl.textContent = 'Qua bài';
+        btn.title = `Bình chọn qua bài (cần ${needed} phiếu — ≥ 50% thành viên)`;
+    }
+
+    if (countEl) {
+        countEl.textContent = `${count}/${needed}`;
+    }
 }
 
 let priorityBannerTimer = null;
@@ -1467,6 +1521,17 @@ function initPlayerListeners() {
             }
             const newAction = (player.status === 'playing') ? 'pause' : 'play';
             window.roomSocket.controlPlayback(newAction, player.getCurrentTime());
+        };
+    }
+
+    const skipBtn = document.getElementById('btn-vote-skip');
+    if (skipBtn) {
+        skipBtn.onclick = () => {
+            if (!window.appState.roomData || !window.appState.roomData.current_track) {
+                showToast('Hiện chưa có bài hát nào đang phát!', 'info');
+                return;
+            }
+            window.roomSocket.voteSkip();
         };
     }
 

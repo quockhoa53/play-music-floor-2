@@ -204,6 +204,10 @@ class RoomSocket {
         this.send('cancel_priority');
     }
 
+    voteSkip() {
+        this.send('vote_skip');
+    }
+
     controlPlayback(subAction, currentTime) {
         this.send('control', { sub_action: subAction, current_time: currentTime });
     }

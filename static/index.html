@@ -521,7 +521,7 @@
 
                         <!-- Bottom Controls Row -->
                         <div class="mt-3.5 flex flex-wrap items-center justify-between gap-3">
-                            <div class="flex items-center gap-3">
+                            <div class="flex items-center gap-2.5">
                                 <!-- Play / Pause Glowing Orb -->
                                 <button type="button" id="btn-play-pause"
                                     class="btn-gradient w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0"
@@ -530,7 +530,15 @@
                                         <path d="M8 5.14v14l11-7-11-7z" fill="currentColor"/>
                                     </svg>
                                 </button>
-                                <span class="text-xs font-medium text-sub hidden sm:inline">Phát tuần tự theo danh sách chờ</span>
+
+                                <!-- Majority Skip Vote Button (>= 50% members) -->
+                                <button type="button" id="btn-vote-skip"
+                                    class="surface-subtle px-3.5 py-2 rounded-full text-xs font-bold text-main hover:border-indigo-500/40 inline-flex items-center gap-2 transition"
+                                    title="Bình chọn qua bài (cần ≥ 50% thành viên đồng ý)">
+                                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+                                    <span id="skip-vote-label">Qua bài</span>
+                                    <span id="skip-vote-count" class="px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[11px] font-mono-num">0/1</span>
+                                </button>
                             </div>
 
                             <!-- Local Volume -->
@@ -800,9 +808,9 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/socket.js?v=2.2"></script>
-    <script src="/static/js/player.js?v=2.2"></script>
-    <script src="/static/js/chat.js?v=2.2"></script>
-    <script src="/static/js/app.js?v=2.2"></script>
+    <script src="/static/js/socket.js?v=2.3"></script>
+    <script src="/static/js/player.js?v=2.3"></script>
+    <script src="/static/js/chat.js?v=2.3"></script>
+    <script src="/static/js/app.js?v=2.3"></script>
 </body>
 </html>
