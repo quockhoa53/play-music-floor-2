@@ -30,6 +30,7 @@ const searchState = {
     addedIds: new Set(),
     lastQuery: '',
     isOpen: false,
+    cache: new Map(), // client-side instant cache: queryLower -> { ts, results }
 };
 
 function generateUid() {
@@ -453,11 +454,42 @@ function initRealtimeSearch() {
         renderSearchResultsList(searchState.results);
     };
 
+    const applyResultsToUI = (results, query, isDirectUrl) => {
+        const list = document.getElementById('search-results-list');
+        if (list) list.classList.remove('opacity-60');
+
+        searchState.results = results;
+        searchState.highlightedIndex = results.length > 0 ? 0 : -1;
+
+        const header = document.getElementById('search-dropdown-header');
+        if (header) {
+            header.textContent = results.length > 0
+                ? (isDirectUrl ? 'Đã nhận diện video YouTube' : `Kết quả tức thì (${results.length}) — Bấm Enter để thêm nhanh`)
+                : `Không tìm thấy kết quả cho "${query}"`;
+        }
+        renderSearchResultsList(results);
+    };
+
     const performRealtimeSearch = async (rawQuery) => {
         const query = rawQuery.trim();
         if (!query) {
             setLoading(false);
+            searchState.lastQuery = '';
             renderDropdownSuggestions();
+            return;
+        }
+
+        const cacheKey = query.toLowerCase();
+        const isDirectUrl = YT_URL_REGEX.test(query);
+
+        // 0ms Instant Client-Side Cache Hit
+        const cached = searchState.cache.get(cacheKey);
+        if (cached && (Date.now() - cached.ts) < 300000) {
+            if (searchState.abortController) searchState.abortController.abort();
+            searchState.lastQuery = cacheKey;
+            openDropdown();
+            setLoading(false);
+            applyResultsToUI(cached.results, query, isDirectUrl);
             return;
         }
 
@@ -467,12 +499,20 @@ function initRealtimeSearch() {
         }
         const controller = new AbortController();
         searchState.abortController = controller;
-        searchState.lastQuery = query;
+        searchState.lastQuery = cacheKey;
 
-        const isDirectUrl = YT_URL_REGEX.test(query);
         openDropdown();
         setLoading(true);
-        renderSkeletons(isDirectUrl ? 'Đang lấy thông tin video từ link YouTube...' : `Đang tìm "${query}"...`);
+
+        const list = document.getElementById('search-results-list');
+        const header = document.getElementById('search-dropdown-header');
+        // Keep previous results visible & gently dimmed while updating (zero flicker!)
+        if (searchState.results.length > 0 && list && list.children.length > 0) {
+            list.classList.add('opacity-60', 'transition-opacity');
+            if (header) header.textContent = isDirectUrl ? 'Đang lấy thông tin link...' : `Đang cập nhật "${query}"...`;
+        } else {
+            renderSkeletons(isDirectUrl ? 'Đang lấy thông tin video từ link YouTube...' : `Đang tìm "${query}"...`);
+        }
 
         try {
             const res = await fetch(`/api/youtube/search?q=${encodeURIComponent(query)}`, {
@@ -482,21 +522,19 @@ function initRealtimeSearch() {
             if (controller.signal.aborted) return;
 
             const results = data.results || [];
-            searchState.results = results;
-            searchState.highlightedIndex = results.length > 0 ? 0 : -1;
-
-            const header = document.getElementById('search-dropdown-header');
-            if (header) {
-                header.textContent = results.length > 0
-                    ? (isDirectUrl ? 'Đã nhận diện video YouTube' : `Kết quả tức thì (${results.length}) — Bấm Enter để thêm nhanh`)
-                    : `Không tìm thấy kết quả cho "${query}"`;
+            if (results.length > 0) {
+                if (searchState.cache.size >= 100) {
+                    const firstKey = searchState.cache.keys().next().value;
+                    searchState.cache.delete(firstKey);
+                }
+                searchState.cache.set(cacheKey, { ts: Date.now(), results });
             }
 
-            renderSearchResultsList(results);
+            applyResultsToUI(results, query, isDirectUrl);
         } catch (err) {
             if (err.name === 'AbortError') return;
-            const list = document.getElementById('search-results-list');
             if (list) {
+                list.classList.remove('opacity-60');
                 list.innerHTML = `<div class="text-center py-6 text-rose-500 text-xs">Không thể tìm kiếm lúc này. Hãy thử lại!</div>`;
             }
         } finally {
@@ -520,9 +558,16 @@ function initRealtimeSearch() {
 
         if (!trimmed) {
             if (searchState.abortController) searchState.abortController.abort();
+            searchState.lastQuery = '';
             setLoading(false);
             openDropdown();
             renderDropdownSuggestions();
+            return;
+        }
+
+        // Skip redundant search if only trailing spaces changed
+        if (trimmed.toLowerCase() === searchState.lastQuery && searchState.results.length > 0) {
+            openDropdown();
             return;
         }
 
@@ -540,11 +585,18 @@ function initRealtimeSearch() {
             return;
         }
 
-        // Show subtle feedback immediately and debounce 280ms
+        // Instant hit if already in client cache (0ms!)
+        const cached = searchState.cache.get(trimmed.toLowerCase());
+        if (cached && (Date.now() - cached.ts) < 300000) {
+            performRealtimeSearch(trimmed);
+            return;
+        }
+
+        // Snappy 180ms debounce for realtime feel
         openDropdown();
         searchState.debounceTimer = setTimeout(() => {
             performRealtimeSearch(trimmed);
-        }, 280);
+        }, 180);
     });
 
     input.addEventListener('focus', () => {
@@ -596,6 +648,7 @@ function initRealtimeSearch() {
         clearBtn.onclick = () => {
             input.value = '';
             searchState.results = [];
+            searchState.lastQuery = '';
             searchState.addedIds.clear();
             if (searchState.debounceTimer) clearTimeout(searchState.debounceTimer);
             if (searchState.abortController) searchState.abortController.abort();

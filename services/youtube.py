@@ -1,6 +1,5 @@
-"""Ultra-fast YouTube metadata extraction and realtime search service."""
+"""Ultra-fast YouTube metadata extraction and realtime Innertube search service."""
 import asyncio
-import json
 import os
 import re
 import time
@@ -18,22 +17,42 @@ YDL_OPTS = {
     "no_color": True,
 }
 
-SEARCH_HEADERS = {
+MWEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Mobile Safari/537.36"
+    ),
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Content-Type": "application/json",
+    "Origin": "https://m.youtube.com",
+    "Referer": "https://m.youtube.com/",
+}
+
+WEB_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Content-Type": "application/json",
+    "Origin": "https://www.youtube.com",
+    "Referer": "https://www.youtube.com/",
 }
 
-# Persistent HTTP client for connection pooling (faster realtime search)
+# Persistent HTTP client for connection pooling (eliminates repeated TLS handshakes)
 _http_client: Optional[httpx.AsyncClient] = None
 
-# Simple TTL cache: query_lower -> (timestamp, results)
+# TTL cache: query_lower::limit -> (timestamp, results)
 _search_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
-CACHE_TTL_SEC = 300
-CACHE_MAX_SIZE = 120
+CACHE_TTL_SEC = 600
+CACHE_MAX_SIZE = 250
+
+# In-flight search deduplication: cache_key -> asyncio.Task
+_inflight_searches: Dict[str, asyncio.Task] = {}
 
 # Audio stream URL cache: video_id -> (timestamp, stream_url, content_type)
 _audio_url_cache: Dict[str, Tuple[float, str, str]] = {}
@@ -44,12 +63,20 @@ def _get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
-            headers=SEARCH_HEADERS,
-            timeout=6.0,
+            timeout=httpx.Timeout(4.0, connect=2.5),
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            limits=httpx.Limits(max_connections=30, max_keepalive_connections=15, keepalive_expiry=120),
         )
     return _http_client
+
+
+async def warmup_youtube_connection():
+    """Pre-warm TLS keep-alive connection to YouTube Innertube on server startup."""
+    try:
+        client = _get_http_client()
+        await client.get("https://m.youtube.com/generate_204", timeout=3.0)
+    except Exception:
+        pass
 
 
 def extract_video_id(url_or_id: str) -> Optional[str]:
@@ -100,13 +127,25 @@ def format_duration(seconds: Optional[int | float]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _extract_text(obj: Any) -> str:
+    """Safely extract text from YouTube Innertube simpleText or runs list."""
+    if not isinstance(obj, dict):
+        return ""
+    if "simpleText" in obj:
+        return str(obj["simpleText"])
+    runs = obj.get("runs")
+    if isinstance(runs, list):
+        return "".join(str(r.get("text", "")) for r in runs if isinstance(r, dict))
+    return ""
+
+
 async def get_video_oembed(video_id: str) -> Optional[Dict[str, Any]]:
-    """Fast metadata fetch using YouTube oEmbed API (<150ms, no IP block)."""
+    """Fast metadata fetch using YouTube oEmbed API (~60-150ms, never blocked)."""
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
         oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url)}&format=json"
         client = _get_http_client()
-        resp = await client.get(oembed_url, timeout=4.0)
+        resp = await client.get(oembed_url, timeout=3.5)
         if resp.status_code == 200:
             data = resp.json()
             return {
@@ -124,7 +163,7 @@ async def get_video_oembed(video_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _sync_ytdlp_extract(url_or_query: str, is_search: bool = False, limit: int = 8) -> Any:
-    """Run yt-dlp in synchronous mode (fallback)."""
+    """Run yt-dlp in synchronous mode (last-resort fallback)."""
     opts = dict(YDL_OPTS)
     proxy = (os.getenv("YT_PROXY") or "").strip()
     if proxy:
@@ -135,22 +174,105 @@ def _sync_ytdlp_extract(url_or_query: str, is_search: bool = False, limit: int =
         return ydl.extract_info(url_or_query, download=False)
 
 
-async def _fast_scrape_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """Direct async YouTube search via ytInitialData (~400-700ms)."""
+async def _innertube_mweb_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """Ultra-lightweight Innertube MWEB JSON search (~120 KB payload, ~200-450ms, no HTML/regex)."""
     client = _get_http_client()
-    resp = await client.get(
-        "https://www.youtube.com/results",
-        params={"search_query": query},
-        timeout=5.0,
+    resp = await client.post(
+        "https://m.youtube.com/youtubei/v1/search?prettyPrint=false",
+        headers=MWEB_HEADERS,
+        json={
+            "context": {
+                "client": {
+                    "clientName": "MWEB",
+                    "clientVersion": "2.20240501.00.00",
+                    "hl": "vi",
+                    "gl": "VN",
+                }
+            },
+            "query": query,
+            "params": "EgIQAQ%3D%3D",  # Filter: Videos only
+        },
+        timeout=3.5,
     )
     if resp.status_code != 200:
         return []
 
-    m = re.search(r"var ytInitialData = (\{.*?\});</script>", resp.text)
-    if not m:
+    data = resp.json()
+    sections = data.get("contents", {}).get("sectionListRenderer", {}).get("contents", [])
+    items: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    for sec in sections:
+        contents = sec.get("itemSectionRenderer", {}).get("contents", [])
+        for entry in contents:
+            vr = (
+                entry.get("videoWithContextRenderer")
+                or entry.get("compactVideoRenderer")
+                or entry.get("videoRenderer")
+            )
+            if not vr:
+                continue
+            vid = vr.get("videoId")
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+
+            title = _extract_text(vr.get("headline")) or _extract_text(vr.get("title"))
+            author = _extract_text(vr.get("shortBylineText")) or _extract_text(vr.get("ownerText"))
+            dur_str = _extract_text(vr.get("lengthText"))
+            if not dur_str:
+                # Check if live badge is present
+                badges = vr.get("badges") or []
+                overlays = vr.get("thumbnailOverlays") or []
+                is_live = any("LIVE" in str(b).upper() for b in badges) or any(
+                    "LIVE" in str(o).upper() for o in overlays
+                )
+                if is_live:
+                    dur_str = "LIVE"
+
+            views = _extract_text(vr.get("shortViewCountText"))
+            duration_sec = parse_duration_str(dur_str) if dur_str and dur_str != "LIVE" else 0
+
+            items.append({
+                "id": vid,
+                "title": title or f"Video {vid}",
+                "author": author or "YouTube",
+                "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                "duration": duration_sec,
+                "duration_str": dur_str,
+                "views": views,
+            })
+
+            if len(items) >= limit:
+                return items
+
+    return items
+
+
+async def _innertube_web_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """Fallback Innertube WEB JSON search (~450 KB payload, pure JSON)."""
+    client = _get_http_client()
+    resp = await client.post(
+        "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
+        headers=WEB_HEADERS,
+        json={
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": "2.20240501.00.00",
+                    "hl": "vi",
+                    "gl": "VN",
+                }
+            },
+            "query": query,
+            "params": "EgIQAQ%3D%3D",
+        },
+        timeout=4.0,
+    )
+    if resp.status_code != 200:
         return []
 
-    data = json.loads(m.group(1))
+    data = resp.json()
     sections = (
         data.get("contents", {})
         .get("twoColumnSearchResultsRenderer", {})
@@ -173,17 +295,12 @@ async def _fast_scrape_search(query: str, limit: int = 8) -> List[Dict[str, Any]
                 continue
             seen_ids.add(vid)
 
-            title = "".join(r.get("text", "") for r in vr.get("title", {}).get("runs", []))
-            author = "".join(r.get("text", "") for r in vr.get("ownerText", {}).get("runs", []))
-            dur_str = vr.get("lengthText", {}).get("simpleText", "")
-            is_live = not dur_str and any(
-                b.get("metadataBadgeRenderer", {}).get("style") == "BADGE_STYLE_TYPE_LIVE_NOW"
-                for b in vr.get("badges", [])
-            )
-            if is_live:
+            title = _extract_text(vr.get("title"))
+            author = _extract_text(vr.get("ownerText"))
+            dur_str = _extract_text(vr.get("lengthText"))
+            if not dur_str and any("LIVE" in str(b).upper() for b in vr.get("badges", [])):
                 dur_str = "LIVE"
-
-            views = vr.get("shortViewCountText", {}).get("simpleText", "")
+            views = _extract_text(vr.get("shortViewCountText"))
             duration_sec = parse_duration_str(dur_str) if dur_str and dur_str != "LIVE" else 0
 
             items.append({
@@ -246,34 +363,24 @@ async def get_video_info(url_or_id: str, fast: bool = False) -> Optional[Dict[st
     }
 
 
-async def search_youtube(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """Realtime YouTube search with fast HTML scraping, TTL cache, and yt-dlp fallback."""
-    query = query.strip()
-    if not query:
-        return []
-
-    # Direct YouTube URL / Video ID -> ultra-fast oEmbed path (<150ms)
-    video_id = extract_video_id(query)
-    if video_id:
-        info = await get_video_info(video_id, fast=True)
-        return [info] if info else []
-
-    # Check TTL cache
-    cache_key = f"{query.lower()}::{limit}"
-    now = time.time()
-    cached = _search_cache.get(cache_key)
-    if cached and (now - cached[0]) < CACHE_TTL_SEC:
-        return cached[1]
-
+async def _run_search_pipeline(query: str, limit: int) -> List[Dict[str, Any]]:
+    """Execute tiered search: Innertube MWEB -> Innertube WEB -> yt-dlp."""
     items: List[Dict[str, Any]] = []
 
-    # Primary: Fast direct async scrape
+    # 1. Primary: Ultra-lightweight MWEB Innertube (~120 KB JSON)
     try:
-        items = await _fast_scrape_search(query, limit=limit)
+        items = await _innertube_mweb_search(query, limit=limit)
     except Exception as e:
-        print(f"[fast search error] {e}")
+        print(f"[mweb innertube error] {e}")
 
-    # Fallback: yt-dlp if fast scrape failed or returned nothing
+    # 2. Fallback 1: WEB Innertube (~450 KB JSON)
+    if not items:
+        try:
+            items = await _innertube_web_search(query, limit=limit)
+        except Exception as e:
+            print(f"[web innertube error] {e}")
+
+    # 3. Fallback 2: yt-dlp (last resort)
     if not items:
         loop = asyncio.get_running_loop()
         try:
@@ -297,12 +404,44 @@ async def search_youtube(query: str, limit: int = 8) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"[yt-dlp search fallback error] {e}")
 
+    return items
+
+
+async def search_youtube(query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """Realtime YouTube search with Innertube JSON, TTL cache, and in-flight deduplication."""
+    query = query.strip()
+    if not query:
+        return []
+
+    # Direct YouTube URL / Video ID -> ultra-fast oEmbed path (~60-150ms)
+    video_id = extract_video_id(query)
+    if video_id:
+        info = await get_video_info(video_id, fast=True)
+        return [info] if info else []
+
+    cache_key = f"{query.lower()}::{limit}"
+    now = time.time()
+    cached = _search_cache.get(cache_key)
+    if cached and (now - cached[0]) < CACHE_TTL_SEC:
+        return cached[1]
+
+    # Coalesce concurrent identical searches
+    task = _inflight_searches.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(_run_search_pipeline(query, limit))
+        _inflight_searches[cache_key] = task
+
+    try:
+        items = await task
+    finally:
+        if _inflight_searches.get(cache_key) is task:
+            _inflight_searches.pop(cache_key, None)
+
     if items:
         if len(_search_cache) >= CACHE_MAX_SIZE:
-            # Evict oldest entry
             oldest_key = min(_search_cache, key=lambda k: _search_cache[k][0])
             _search_cache.pop(oldest_key, None)
-        _search_cache[cache_key] = (now, items)
+        _search_cache[cache_key] = (time.time(), items)
 
     return items
 
@@ -354,4 +493,3 @@ async def get_audio_stream_url(video_id: str) -> Optional[Tuple[str, str]]:
     except Exception as e:
         print(f"[audio stream extract error] {e}")
     return None
-

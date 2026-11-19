@@ -4,6 +4,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Set
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Query
@@ -18,9 +19,17 @@ from services.youtube import (
     search_youtube,
     format_duration,
     get_audio_stream_url,
+    warmup_youtube_connection,
 )
 
-app = FastAPI(title="Floor 2 - Sync Music Room & Chat", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    asyncio.create_task(warmup_youtube_connection())
+    yield
+
+
+app = FastAPI(title="Floor 2 - Sync Music Room & Chat", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
