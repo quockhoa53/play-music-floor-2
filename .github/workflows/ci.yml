@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Cài đặt thư viện Python
+        run: pip install -r requirements.txt
+
+      - name: Kiểm tra cú pháp Python
+        run: python -m compileall -q main.py services tests
+
+      - name: Kiểm tra cú pháp JavaScript Frontend
+        run: |
+          node --check static/js/socket.js
+          node --check static/js/player.js
+          node --check static/js/chat.js
+          node --check static/js/app.js
+
+      - name: Chạy Smoke Tests (REST, FIFO Queue & WebSocket)
+        run: python tests/smoke_test.py

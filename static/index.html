@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Floor 2 — Phòng Nhạc YouTube Đồng Bộ & Chat Realtime</title>
+
+    <!-- Prevent Theme Flash Before Render -->
+    <script>
+        (function () {
+            const saved = localStorage.getItem('floor2_theme');
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (saved === 'dark' || (!saved && prefersDark)) {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+    </script>
+
+    <!-- Fonts: Plus Jakarta Sans + JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Plus Jakarta Sans', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Custom Dual-Theme Stylesheet -->
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎵</text></svg>">
+</head>
+<body class="min-h-screen flex flex-col selection:bg-indigo-500 selection:text-white">
+
+    <!-- Ambient Animated Mesh Canvas + Dynamic Track Cover Backdrop -->
+    <div class="ambient-canvas">
+        <div class="ambient-orb ambient-orb-1"></div>
+        <div class="ambient-orb ambient-orb-2"></div>
+        <div class="ambient-orb ambient-orb-3"></div>
+    </div>
+    <div id="room-ambient-bg"></div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container"></div>
+
+    <!-- ===================================================================== -->
+    <!-- 1. LOBBY VIEW (Tạo / Chọn Phòng) -->
+    <!-- ===================================================================== -->
+    <div id="lobby-view" class="relative z-10 flex-1 flex flex-col min-h-screen">
+
+        <!-- Lobby Minimal Top Bar -->
+        <nav class="w-full max-w-5xl mx-auto px-4 md:px-8 pt-5 pb-2 flex items-center justify-between">
+            <div class="flex items-center gap-2.5">
+                <div class="w-9 h-9 rounded-xl btn-gradient flex items-center justify-center shadow-md">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                </div>
+                <span class="font-extrabold text-base tracking-tight text-main">Floor 2 <span class="font-medium text-dim">Studio</span></span>
+            </div>
+
+            <!-- Theme Switcher -->
+            <button type="button" class="js-theme-toggle theme-toggle-btn px-3.5 py-2 rounded-full text-xs font-semibold flex items-center gap-2">
+                <span class="js-theme-icon"></span>
+                <span class="js-theme-label">Nền sáng</span>
+            </button>
+        </nav>
+
+        <!-- Lobby Main Content -->
+        <main class="flex-1 flex items-center justify-center px-4 md:px-8 py-6">
+            <div class="max-w-5xl w-full">
+
+                <!-- Hero Heading -->
+                <div class="text-center mb-9">
+                    <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full surface-card text-indigo-600 dark:text-indigo-400 text-xs font-bold tracking-wide mb-4">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        ĐỒNG BỘ TỪNG GIÂY • PHÁT NHẠC THEO THỨ TỰ • CHAT REALTIME
+                    </div>
+                    <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-main leading-tight">
+                        Nghe nhạc YouTube chung,<br class="hidden sm:inline">
+                        <span class="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 via-violet-500 to-pink-500 dark:from-indigo-400 dark:via-purple-300 dark:to-pink-400">
+                            chill cùng bạn bè mọi lúc
+                        </span>
+                    </h1>
+                    <p class="text-sub text-sm sm:text-base mt-3 max-w-xl mx-auto leading-relaxed">
+                        Tạo phòng trong 1 giây, tìm kiếm nhạc YouTube tức thì không cần bấm nút và thưởng thức danh sách phát nối tiếp cùng nhau.
+                    </p>
+                </div>
+
+                <!-- 2-Column Lobby Grid -->
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+                    <!-- Left: User Profile Customization Card -->
+                    <div class="lg:col-span-5 surface-card p-6 rounded-3xl">
+                        <div class="flex items-center justify-between mb-5">
+                            <h3 class="text-sm font-bold text-main flex items-center gap-2">
+                                <span class="w-7 h-7 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                                </span>
+                                Hồ sơ của bạn
+                            </h3>
+                            <span class="text-[11px] font-medium text-dim">Tự lưu</span>
+                        </div>
+
+                        <!-- Live Identity Preview Pill -->
+                        <div class="surface-subtle p-3 rounded-2xl mb-5 flex items-center gap-3">
+                            <div id="profile-preview-avatar" class="w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-sm flex-shrink-0 border-2 transition-all">
+                                🎧
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <div class="flex items-center gap-1.5">
+                                    <span id="profile-preview-name" class="text-sm font-bold truncate">DJ Mèo Con</span>
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold">Online</span>
+                                </div>
+                                <p class="text-[11px] text-dim mt-0.5">Hiển thị trong danh sách thành viên & khung chat</p>
+                            </div>
+                        </div>
+
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-semibold text-sub mb-1.5">Tên hiển thị</label>
+                                <input type="text" id="profile-name-input" maxlength="25"
+                                    class="input-field w-full px-3.5 py-2.5 rounded-xl text-sm font-medium"
+                                    placeholder="Nhập biệt danh của bạn...">
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-sub mb-2">Chọn biểu tượng</label>
+                                <div id="avatar-selector-grid" class="grid grid-cols-8 sm:grid-cols-8 lg:grid-cols-4 gap-2"></div>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-sub mb-2">Màu sắc tên chat</label>
+                                <div id="color-selector-grid" class="flex items-center flex-wrap gap-2.5"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Create / Join + Active Rooms -->
+                    <div class="lg:col-span-7 flex flex-col gap-6">
+
+                        <!-- Create / Join Segmented Card -->
+                        <div class="surface-card p-6 rounded-3xl">
+                            <div class="flex items-center justify-between flex-wrap gap-3 mb-5">
+                                <h3 class="text-sm font-bold text-main">Bắt đầu ngay</h3>
+                                <div class="segmented-track p-1 rounded-xl inline-flex gap-1">
+                                    <button type="button" id="lobby-tab-create" class="segmented-btn active px-3.5 py-1.5 rounded-lg text-xs font-bold">
+                                        Tạo phòng mới
+                                    </button>
+                                    <button type="button" id="lobby-tab-join" class="segmented-btn px-3.5 py-1.5 rounded-lg text-xs font-bold">
+                                        Vào bằng mã
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Pane 1: Create Room -->
+                            <div id="lobby-pane-create">
+                                <form onsubmit="handleCreateRoom(event)" class="space-y-3.5">
+                                    <div class="flex flex-col sm:flex-row gap-2.5">
+                                        <input type="text" id="create-room-name"
+                                            class="input-field flex-1 px-4 py-3 rounded-xl text-sm font-medium"
+                                            placeholder="Đặt tên phòng (VD: Góc Chill Tối Thứ 6, Lofi Học Bài...)">
+                                        <button type="submit"
+                                            class="btn-gradient px-6 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 flex-shrink-0">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                                            <span>Tạo phòng</span>
+                                        </button>
+                                    </div>
+                                    <label class="inline-flex items-center gap-2.5 cursor-pointer select-none pt-0.5">
+                                        <input type="checkbox" id="create-room-dj-mode" class="w-4 h-4 rounded accent-indigo-600">
+                                        <span class="text-xs text-sub">Bật chế độ DJ (chỉ Chủ phòng có quyền tạm dừng / chuyển bài)</span>
+                                    </label>
+                                </form>
+                            </div>
+
+                            <!-- Pane 2: Join Room by Code -->
+                            <div id="lobby-pane-join" class="hidden">
+                                <form onsubmit="handleJoinRoom(event)" class="flex flex-col sm:flex-row gap-2.5">
+                                    <div class="relative flex-1">
+                                        <span class="absolute inset-y-0 left-0 pl-4 flex items-center text-dim font-mono-num font-bold text-sm">#</span>
+                                        <input type="text" id="input-join-room-id"
+                                            class="input-field w-full pl-9 pr-4 py-3 rounded-xl text-sm font-medium"
+                                            placeholder="Nhập mã phòng (VD: chill-zone)...">
+                                    </div>
+                                    <button type="submit"
+                                        class="btn-gradient px-6 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 flex-shrink-0">
+                                        <span>Tham gia ngay</span>
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+
+                        <!-- Active Public Rooms -->
+                        <div class="surface-card p-6 rounded-3xl">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-sm font-bold text-main flex items-center gap-2">
+                                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                    Phòng đang hoạt động
+                                </h3>
+                                <button type="button" onclick="loadPublicRooms()" class="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                    Làm mới
+                                </button>
+                            </div>
+                            <div id="active-rooms-list" class="space-y-2.5 max-h-64 overflow-y-auto pr-1"></div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 2. ROOM VIEW (Phòng Nghe Nhạc, Realtime Search & Chat) -->
+    <!-- ===================================================================== -->
+    <div id="room-view" class="hidden relative z-10 flex-1 flex flex-col h-screen overflow-hidden">
+
+        <!-- TOP STUDIO HEADER WITH SPOTLIGHT REALTIME SEARCH -->
+        <header class="surface-card border-b border-theme px-3 md:px-5 py-2.5 flex-shrink-0 z-40">
+            <div class="flex flex-wrap lg:flex-nowrap items-center justify-between gap-3">
+
+                <!-- Left: Room Identity -->
+                <div class="flex items-center gap-2.5 min-w-0 order-1">
+                    <div class="w-9 h-9 rounded-xl btn-gradient flex items-center justify-center flex-shrink-0">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                    </div>
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                            <h2 id="room-title-display" class="font-bold text-main text-sm md:text-[15px] truncate max-w-[160px] sm:max-w-[220px]">Phòng Nhạc</h2>
+                            <button type="button" id="room-id-badge" title="Bấm để sao chép link mời"
+                                class="px-2 py-0.5 rounded-md surface-subtle text-sub hover:text-indigo-600 dark:hover:text-indigo-400 text-[11px] font-mono-num font-semibold flex-shrink-0 cursor-pointer">
+                                #id
+                            </button>
+                            <div id="user-role-badge" class="hidden sm:block flex-shrink-0"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Center: REALTIME AS-YOU-TYPE SEARCH BAR (No Search Button!) -->
+                <div id="realtime-search-wrapper" class="relative w-full lg:max-w-xl lg:flex-1 order-3 lg:order-2">
+                    <div class="relative flex items-center">
+                        <!-- Search Icon -->
+                        <span class="absolute left-3.5 text-dim pointer-events-none">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        </span>
+
+                        <input type="text" id="search-music-input" autocomplete="off" spellcheck="false"
+                            class="input-field w-full pl-10 pr-16 py-2.5 rounded-2xl text-xs md:text-sm font-medium"
+                            placeholder="Gõ tên bài hát hoặc dán link YouTube (tìm realtime)...">
+
+                        <!-- Right Slot inside Input: Spinner / Clear / Shortcut Hint -->
+                        <div class="absolute right-2.5 flex items-center gap-1.5">
+                            <span id="search-spinner" class="hidden text-indigo-500">
+                                <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3.5"></circle>
+                                    <path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                </svg>
+                            </span>
+
+                            <button type="button" id="btn-clear-search" class="hidden w-6 h-6 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs" title="Xóa tìm kiếm">
+                                ✕
+                            </button>
+
+                            <span id="search-kbd-hint" class="flex items-center">
+                                <kbd class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md surface-subtle text-[10px] font-mono-num text-dim">
+                                    /
+                                </kbd>
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Floating Realtime Search Results Dropdown -->
+                    <div id="search-results-box" class="hidden search-dropdown-anim absolute left-0 right-0 top-[calc(100%+8px)] surface-dropdown rounded-2xl p-2.5 z-50">
+                        <div class="flex items-center justify-between px-2 pb-2 mb-1.5 border-b border-theme">
+                            <span id="search-dropdown-header" class="text-[11px] font-semibold text-sub">
+                                Gợi ý nhanh — Gõ để tìm kiếm YouTube tức thì
+                            </span>
+                            <span class="hidden sm:inline text-[10px] text-dim font-mono-num">↑↓ Chọn • Enter Thêm • Esc Đóng</span>
+                        </div>
+                        <div id="search-results-list" class="space-y-1 max-h-[360px] overflow-y-auto pr-0.5">
+                            <!-- Populated live as you type -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Compact Studio Controls -->
+                <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 order-2 lg:order-3">
+                    <!-- Quick Radio Mode Pill Toggle -->
+                    <button type="button" id="btn-header-radio-toggle" class="surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main inline-flex items-center gap-1.5" title="Bật/Tắt chế độ Radio (nghe nhạc không cần xem video)">
+                        <svg class="w-3.5 h-3.5 text-pink-500" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
+                        <span class="hidden md:inline js-header-radio-label">Radio</span>
+                    </button>
+
+                    <!-- DJ Mode (Host only) -->
+                    <button type="button" id="btn-dj-mode-toggle" class="hidden surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-semibold text-main inline-flex items-center gap-1.5" title="Bật/Tắt chế độ chỉ Host điều khiển nhạc">
+                        DJ: Tắt
+                    </button>
+
+                    <!-- Sound FX Toggle -->
+                    <button type="button" id="btn-toggle-sound-fx" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center" title="Bật/Tắt chuông thông báo">
+                    </button>
+
+                    <!-- Light / Dark Theme Switcher -->
+                    <button type="button" class="js-theme-toggle theme-toggle-btn w-9 h-9 rounded-xl flex items-center justify-center" title="Chuyển giao diện Sáng / Tối">
+                        <span class="js-theme-icon"></span>
+                    </button>
+
+                    <!-- Share Invite Link -->
+                    <button type="button" id="btn-share-room" class="btn-gradient px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
+                        <span class="hidden sm:inline">Mời bạn</span>
+                    </button>
+
+                    <!-- Leave Room -->
+                    <button type="button" id="btn-leave-room" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center text-sub hover:text-rose-500 hover:border-rose-500/40" title="Rời phòng">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    </button>
+                </div>
+
+            </div>
+        </header>
+
+        <!-- MAIN WORKSPACE: STAGE + QUEUE (Left) | CHAT + MEMBERS (Right) -->
+        <div class="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+
+            <!-- LEFT / CENTER COLUMN -->
+            <div class="flex-1 overflow-y-auto p-3.5 md:p-5 lg:p-6 space-y-5">
+
+                <!-- NOW PLAYING STAGE CARD -->
+                <section class="surface-card rounded-3xl p-4 md:p-5 overflow-hidden">
+
+                    <!-- Mode Switcher Bar: Video vs Radio -->
+                    <div class="flex items-center justify-between gap-2 mb-3.5">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <span id="stage-mode-dot" class="w-2 h-2 rounded-full bg-indigo-500"></span>
+                            <span id="stage-mode-heading" class="text-xs font-bold uppercase tracking-wider text-sub truncate">Sân khấu Video</span>
+                        </div>
+
+                        <div class="segmented-track p-1 rounded-xl inline-flex gap-1 flex-shrink-0">
+                            <button type="button" id="btn-mode-video" class="segmented-btn active px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem video YouTube">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                <span>Video</span>
+                            </button>
+                            <button type="button" id="btn-mode-radio" class="segmented-btn px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Chế độ Radio — chỉ nghe nhạc không cần xem video">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
+                                <span>Radio</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Hidden Pure Audio Fallback Engine (for embed-restricted tracks) -->
+                    <audio id="fallback-audio-player" preload="auto" class="hidden"></audio>
+
+                    <!-- Video Engine Container (switches to .yt-audio-engine-hidden in Radio Mode — NEVER display:none!) -->
+                    <div id="player-wrapper">
+                        <div id="youtube-iframe-container" class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black shadow-xl">
+                            <div id="youtube-iframe" class="w-full h-full"></div>
+                        </div>
+                    </div>
+
+                    <!-- RADIO MODE STUDIO DECK (Shown whenever Radio Mode is active — both playing & standby!) -->
+                    <div id="radio-mode-deck" class="hidden radio-deck p-5 sm:p-6">
+                        <div id="radio-mode-bg" class="absolute inset-0 bg-cover bg-center scale-110 blur-2xl opacity-40 transition-all duration-700"></div>
+                        <div class="absolute inset-0 bg-gradient-to-r from-slate-950/85 via-indigo-950/70 to-slate-950/80"></div>
+
+                        <div class="relative z-10 flex flex-col sm:flex-row items-center gap-5 sm:gap-6">
+                            <!-- Spinning Vinyl Disc + Glow Halo -->
+                            <div class="relative w-32 h-32 sm:w-36 sm:h-36 flex-shrink-0">
+                                <div id="radio-vinyl-glow" class="radio-vinyl-glow paused"></div>
+                                <div id="radio-vinyl" class="radio-vinyl-disc vinyl-spin vinyl-paused">
+                                    <div class="radio-vinyl-grooves"></div>
+                                    <div class="relative w-full h-full rounded-full overflow-hidden border-2 border-white/25 shadow-inner">
+                                        <img id="now-playing-thumb" src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80" alt="" class="w-full h-full object-cover">
+                                        <!-- Center Metallic Spindle -->
+                                        <div class="absolute inset-0 m-auto w-7 h-7 rounded-full bg-slate-950 border-2 border-white/40 flex items-center justify-center shadow">
+                                            <div class="w-2 h-2 rounded-full bg-white/80"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Radio Broadcast Info & Animated Spectrum Visualizer -->
+                            <div class="min-w-0 flex-1 w-full text-center sm:text-left">
+                                <!-- Top Broadcast Status Badges -->
+                                <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-2">
+                                    <span id="radio-on-air-badge" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/15 border border-white/20 text-[10px] font-extrabold uppercase tracking-widest text-white">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+                                        CHỜ PHÁT SÓNG
+                                    </span>
+                                    <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/25 border border-indigo-400/30 text-[10px] font-mono-num font-bold text-indigo-200 tracking-wider">
+                                        FM 102.4 • RADIO
+                                    </span>
+                                    <span id="radio-fallback-badge" class="hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-400/35 text-[10px] font-bold text-emerald-200">
+                                        Pure Audio
+                                    </span>
+                                </div>
+
+                                <!-- Song Title & Artist -->
+                                <h4 id="radio-mode-title" class="font-extrabold text-base sm:text-lg text-white leading-snug line-clamp-2">
+                                    Chế độ Radio đã sẵn sàng
+                                </h4>
+                                <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-1 text-xs text-white/75">
+                                    <span id="radio-mode-author" class="truncate font-medium">Gõ tên bài hát phía trên để bắt đầu lên sóng</span>
+                                    <span id="radio-mode-adder"></span>
+                                </div>
+
+                                <!-- 24-Bar Radio Frequency Visualizer -->
+                                <div id="radio-visualizer" class="radio-visualizer paused mt-3.5 justify-center sm:justify-start" aria-hidden="true">
+                                    <span class="radio-wave-bar" style="--d:0.65s;--delay:0.05s;--h:18px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.95s;--delay:0.12s;--h:26px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.75s;--delay:0.22s;--h:20px"></span>
+                                    <span class="radio-wave-bar" style="--d:1.10s;--delay:0.08s;--h:29px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.80s;--delay:0.30s;--h:22px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.68s;--delay:0.15s;--h:28px"></span>
+                                    <span class="radio-wave-bar" style="--d:1.05s;--delay:0.25s;--h:17px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.85s;--delay:0.04s;--h:30px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.72s;--delay:0.18s;--h:24px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.98s;--delay:0.28s;--h:27px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.78s;--delay:0.10s;--h:19px"></span>
+                                    <span class="radio-wave-bar" style="--d:1.15s;--delay:0.35s;--h:29px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.66s;--delay:0.20s;--h:23px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.92s;--delay:0.06s;--h:26px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.82s;--delay:0.32s;--h:18px"></span>
+                                    <span class="radio-wave-bar" style="--d:1.02s;--delay:0.14s;--h:28px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.74s;--delay:0.26s;--h:21px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.88s;--delay:0.09s;--h:25px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.69s;--delay:0.21s;--h:29px"></span>
+                                    <span class="radio-wave-bar" style="--d:1.08s;--delay:0.16s;--h:20px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.79s;--delay:0.29s;--h:24px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.94s;--delay:0.07s;--h:17px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.71s;--delay:0.19s;--h:22px"></span>
+                                    <span class="radio-wave-bar" style="--d:0.86s;--delay:0.24s;--h:15px"></span>
+                                </div>
+
+                                <!-- Up Next Preview Pill -->
+                                <div id="radio-up-next" class="mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/10 text-[11px] text-white/80 max-w-full">
+                                    <span class="font-bold text-indigo-300 flex-shrink-0">Tiếp theo:</span>
+                                    <span id="radio-up-next-title" class="truncate">Chưa có bài kế tiếp trong hàng đợi</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Empty Stage State (Shown in Video Mode when room is idle) -->
+                    <div id="player-empty-state" class="hidden py-12 px-4 text-center rounded-2xl surface-subtle">
+                        <div class="w-16 h-16 mx-auto rounded-2xl btn-gradient flex items-center justify-center mb-4 shadow-lg">
+                            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                        </div>
+                        <h4 class="text-main font-bold text-base">Phòng nhạc đang sẵn sàng</h4>
+                        <p class="text-sub text-xs sm:text-sm mt-1 max-w-md mx-auto">
+                            Gõ tên bài hát vào thanh tìm kiếm realtime phía trên hoặc chọn nhanh một bài gợi ý bên dưới để bắt đầu!
+                        </p>
+                    </div>
+
+                    <!-- Restricted Embed Fallback Link -->
+                    <div class="mt-2 text-right">
+                        <a id="yt-fallback-btn" href="#" target="_blank" class="hidden inline-flex items-center gap-1 text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">
+                            ⚠️ Video hạn chế nhúng — Mở trực tiếp trên YouTube ↗
+                        </a>
+                    </div>
+
+                    <!-- Track Info & Refined Control Dock -->
+                    <div class="mt-4 pt-3.5 border-t border-theme">
+                        <div id="video-track-meta-row" class="flex items-start justify-between gap-3">
+                            <div class="min-w-0 flex-1">
+                                <div class="flex items-center gap-2.5">
+                                    <h3 id="now-playing-title" class="font-extrabold text-main text-base md:text-lg truncate">
+                                        Đang kết nối phòng...
+                                    </h3>
+                                    <div id="now-playing-equalizer" class="flex items-end h-5 equalizer-paused flex-shrink-0" title="Trạng thái phát">
+                                        <span class="equalizer-bar"></span>
+                                        <span class="equalizer-bar"></span>
+                                        <span class="equalizer-bar"></span>
+                                        <span class="equalizer-bar"></span>
+                                        <span class="equalizer-bar"></span>
+                                    </div>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-2 text-xs text-sub mt-1">
+                                    <span id="now-playing-author" class="truncate font-medium">YouTube</span>
+                                    <span id="now-playing-adder"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Progress Scrubber -->
+                        <div class="mt-4 flex items-center gap-3">
+                            <span id="player-time-current" class="text-[11px] font-mono-num text-sub w-11 text-right flex-shrink-0">00:00</span>
+                            <input type="range" id="player-progress-bar" min="0" max="100" value="0" step="0.1"
+                                class="studio-range flex-1">
+                            <span id="player-time-duration" class="text-[11px] font-mono-num text-sub w-11 flex-shrink-0">00:00</span>
+                        </div>
+
+                        <!-- Bottom Controls Row -->
+                        <div class="mt-3.5 flex flex-wrap items-center justify-between gap-3">
+                            <div class="flex items-center gap-2">
+                                <!-- Play / Pause Glowing Orb -->
+                                <button type="button" id="btn-play-pause"
+                                    class="btn-gradient w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0"
+                                    title="Phát / Tạm dừng đồng bộ cả phòng">
+                                    <svg id="play-btn-icon" class="w-5 h-5" viewBox="0 0 24 24">
+                                        <path d="M8 5.14v14l11-7-11-7z" fill="currentColor"/>
+                                    </svg>
+                                </button>
+
+                                <!-- Vote Skip -->
+                                <button type="button" id="btn-vote-skip"
+                                    class="surface-subtle px-3.5 py-2 rounded-xl text-xs font-semibold text-main inline-flex items-center gap-1.5"
+                                    title="Bỏ phiếu chuyển bài tiếp theo">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+                                    <span class="js-skip-label">Bỏ qua (0/1)</span>
+                                </button>
+
+                                <!-- Host Force Skip -->
+                                <button type="button" id="btn-force-skip"
+                                    class="hidden px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-600 dark:text-amber-400 text-xs font-bold inline-flex items-center gap-1 transition"
+                                    title="Chủ phòng chuyển bài ngay lập tức">
+                                    <span>Skip ngay</span>
+                                </button>
+                            </div>
+
+                            <!-- Local Volume -->
+                            <div class="flex items-center gap-2 surface-subtle px-3 py-1.5 rounded-full">
+                                <button type="button" id="btn-toggle-mute" class="text-sub hover:text-main transition" title="Tắt / Bật âm thanh cá nhân">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+                                </button>
+                                <input type="range" id="player-volume-slider" min="0" max="100" value="80"
+                                    class="studio-range w-20 sm:w-24" title="Âm lượng cá nhân">
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- QUICK ADD SUGGESTIONS STRIP -->
+                <section>
+                    <div class="flex items-center justify-between mb-2 px-1">
+                        <span class="text-xs font-bold text-sub uppercase tracking-wider">Thêm nhanh 1 chạm</span>
+                        <span class="text-[11px] text-dim">Bấm để xếp vào hàng đợi</span>
+                    </div>
+                    <div id="quick-suggestions-chips" class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+                        <!-- Populated via initQuickSuggestions() -->
+                    </div>
+                </section>
+
+                <!-- FIFO PLAYLIST QUEUE & HISTORY -->
+                <section class="surface-card rounded-3xl p-4 md:p-5">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                        <div class="segmented-track p-1 rounded-xl inline-flex gap-1">
+                            <button type="button" id="tab-btn-queue" class="segmented-btn active px-3.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-2">
+                                <span>Hàng đợi phát (FIFO)</span>
+                                <span id="queue-count-badge" class="px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[11px] font-mono-num">0</span>
+                            </button>
+                            <button type="button" id="tab-btn-history" class="segmented-btn px-3.5 py-1.5 rounded-lg text-xs font-bold">
+                                Lịch sử đã phát
+                            </button>
+                        </div>
+                        <span id="queue-duration-badge" class="text-[11px] font-medium text-dim">Phát theo thứ tự thêm</span>
+                    </div>
+
+                    <!-- Queue Pane -->
+                    <div id="tab-pane-queue">
+                        <div id="playlist-queue-list" class="space-y-2 max-h-96 overflow-y-auto pr-1"></div>
+                        <div id="queue-empty-state" class="py-10 text-center">
+                            <p class="text-sub text-xs font-medium">Hàng đợi hiện đang trống</p>
+                            <p class="text-dim text-[11px] mt-1">Gõ tên bài hát vào ô tìm kiếm phía trên để thêm nhạc vào hàng đợi!</p>
+                        </div>
+                    </div>
+
+                    <!-- History Pane -->
+                    <div id="tab-pane-history" class="hidden">
+                        <div id="playlist-history-list" class="space-y-2 max-h-96 overflow-y-auto pr-1"></div>
+                    </div>
+                </section>
+
+            </div>
+
+            <!-- RIGHT SIDEBAR: REALTIME CHAT & MEMBERS -->
+            <aside class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[420px] lg:h-auto lg:self-stretch min-h-0 z-20">
+
+                <!-- Segmented Sidebar Tabs -->
+                <div class="p-3 border-b border-theme flex items-center justify-between">
+                    <div class="segmented-track p-1 rounded-xl grid grid-cols-2 w-full gap-1">
+                        <button type="button" id="tab-btn-chat" class="segmented-btn active py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                            <span>Chat trực tiếp</span>
+                        </button>
+                        <button type="button" id="tab-btn-members" class="segmented-btn py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                            <span>Thành viên (<span id="members-count-badge">1</span>)</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- CHAT PANE -->
+                <div id="tab-pane-chat" class="flex-1 flex flex-col overflow-hidden">
+                    <div id="chat-messages-container" class="flex-1 overflow-y-auto p-3.5 space-y-1"></div>
+
+                    <!-- Tactile Floating Reaction Bar -->
+                    <div class="px-3 py-2 border-t border-theme flex items-center justify-between gap-1 overflow-x-auto no-scrollbar">
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="❤️" title="Thả tim">❤️</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🔥" title="Quá cháy">🔥</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🎵" title="Nhạc hay">🎵</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="👏" title="Vỗ tay">👏</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🕺" title="Quẩy lên">🕺</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🍻" title="Cạn ly">🍻</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🚀" title="Bay lên">🚀</button>
+                        <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="😂" title="Haha">😂</button>
+                    </div>
+
+                    <!-- Chat Composer -->
+                    <form id="chat-input-form" class="p-3 border-t border-theme">
+                        <div class="relative flex items-center gap-2">
+                            <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
+                                class="input-field flex-1 pl-4 pr-11 py-2.5 rounded-full text-xs md:text-sm"
+                                placeholder="Nhắn tin với mọi người...">
+                            <button type="submit"
+                                class="btn-gradient absolute right-1.5 w-8 h-8 rounded-full flex items-center justify-center"
+                                title="Gửi tin nhắn">
+                                <svg class="w-4 h-4 translate-x-[1px]" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- MEMBERS PANE -->
+                <div id="tab-pane-members" class="hidden flex-1 overflow-y-auto p-3.5">
+                    <div id="room-members-list" class="space-y-2"></div>
+                </div>
+
+            </aside>
+
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/static/js/socket.js"></script>
+    <script src="/static/js/player.js"></script>
+    <script src="/static/js/chat.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

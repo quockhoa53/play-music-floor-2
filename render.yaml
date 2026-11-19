@@ -1,0 +1,19 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Tự động deploy lên Render khi GitHub Actions (CI) chạy pass trên nhánh main.
+services:
+  - type: web
+    name: play-music-floor-2
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Tuỳ chọn: proxy dân dụng nếu YouTube chặn IP datacenter cho luồng audio fallback
+      - key: YT_PROXY
+        sync: false
