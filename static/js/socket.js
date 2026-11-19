@@ -1,17 +1,19 @@
 /**
- * WebSocket manager with auto-reconnection and event dispatching.
+ * Authenticated WebSocket manager with session tokens, private room invite support & safe reconnection.
  */
 class RoomSocket {
     constructor() {
         this.ws = null;
         this.roomId = null;
-        this.userId = null;
+        this.sessionToken = null;
+        this.inviteToken = null;
         this.userData = null;
         this.isConnected = false;
         this.listeners = {};
         this.reconnectTimer = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
+        this.manualClose = false;
     }
 
     on(event, callback) {
@@ -33,91 +35,126 @@ class RoomSocket {
         }
     }
 
-    connect(roomId, userId, userData) {
+    connect(roomId, sessionToken, userData, inviteToken = null) {
         this.roomId = roomId;
-        this.userId = userId;
+        this.sessionToken = sessionToken;
+        this.inviteToken = inviteToken;
         this.userData = userData;
+        this.manualClose = false;
 
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         if (this.ws) {
-            try { this.ws.close(); } catch (e) {}
+            try {
+                this.ws.onclose = null;
+                this.ws.close();
+            } catch (e) {}
         }
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/${roomId}/${userId}`;
-        console.log(`[Socket] Connecting to: ${wsUrl}`);
-        this.trigger('connecting');
+        const params = new URLSearchParams({ token: sessionToken });
+        if (inviteToken) params.set('invite', inviteToken);
+        const wsUrl = `${protocol}//${window.location.host}/ws/${encodeURIComponent(roomId)}?${params.toString()}`;
 
+        this.trigger('connecting');
         this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
-            console.log('[Socket] Connected!');
             this.isConnected = true;
             this.reconnectAttempts = 0;
             this.trigger('connected');
 
-            // Send Join handshake
             this.send('join', {
                 name: this.userData.name,
                 avatar: this.userData.avatar,
-                color: this.userData.color
+                color: this.userData.color,
             });
         };
 
         this.ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
-                const type = message.type;
-                if (type) {
-                    this.trigger(type, message);
+                if (message.type) {
+                    this.trigger(message.type, message);
                 }
                 this.trigger('*', message);
             } catch (err) {
-                console.error('[Socket] Failed to parse incoming message:', err);
+                console.error('[Socket] Failed to parse message:', err);
             }
         };
 
         this.ws.onclose = (event) => {
-            console.warn('[Socket] Disconnected:', event);
             this.isConnected = false;
-            this.trigger('disconnected');
+            this.trigger('disconnected', event);
+
+            if (this.manualClose) return;
+
+            // Non-retryable security / authorization close codes
+            if (event.code === 4003) {
+                this.trigger('access_denied', { reason: event.reason || 'Không có quyền truy cập phòng riêng tư' });
+                return;
+            }
+            if (event.code === 4004) {
+                this.trigger('room_not_found', { reason: event.reason || 'Phòng không tồn tại' });
+                return;
+            }
+            if (event.code === 4000) {
+                // Replaced by newer tab of same session
+                return;
+            }
+            if (event.code === 4001) {
+                // Session expired — trigger re-auth
+                this.trigger('session_expired');
+                return;
+            }
+            if (event.code === 4029) {
+                this.trigger('rate_limited', { reason: event.reason || 'Quá nhiều kết nối đồng thời' });
+                return;
+            }
+
             this.scheduleReconnect();
         };
 
         this.ws.onerror = (err) => {
-            console.error('[Socket] Error:', err);
-            this.trigger('error', err);
+            this.trigger('socket_error', err);
         };
     }
 
     scheduleReconnect() {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error('[Socket] Max reconnect attempts reached');
             this.trigger('reconnect_failed');
             return;
         }
 
         const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
         this.reconnectAttempts++;
-        console.log(`[Socket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
         this.reconnectTimer = setTimeout(() => {
-            if (this.roomId && this.userId) {
-                this.connect(this.roomId, this.userId, this.userData);
+            if (!this.manualClose && this.roomId && this.sessionToken) {
+                this.connect(this.roomId, this.sessionToken, this.userData, this.inviteToken);
             }
         }, delay);
     }
 
     send(action, payload = {}) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-            console.warn('[Socket] Cannot send message, socket not open:', action);
             return;
         }
-        const data = { action, ...payload };
-        this.ws.send(JSON.stringify(data));
+        this.ws.send(JSON.stringify({ action, ...payload }));
     }
 
     sendChat(text) {
         this.send('chat', { text });
+    }
+
+    sendGif(gifId, caption = '') {
+        this.send('chat', { media_type: 'gif', gif_id: gifId, text: caption });
+    }
+
+    sendImage(mediaId, caption = '') {
+        this.send('chat', { media_type: 'image', media_id: mediaId, text: caption });
     }
 
     sendReaction(emoji) {
@@ -136,16 +173,24 @@ class RoomSocket {
         this.send('reorder_queue', { uids });
     }
 
+    requestPriority(trackUid) {
+        this.send('request_priority', { track_uid: trackUid });
+    }
+
+    votePriority(trackUid) {
+        this.send('vote_priority', { track_uid: trackUid });
+    }
+
+    cancelPriority() {
+        this.send('cancel_priority');
+    }
+
     controlPlayback(subAction, currentTime) {
         this.send('control', { sub_action: subAction, current_time: currentTime });
     }
 
-    voteSkip(force = false) {
-        this.send('skip', { force });
-    }
-
-    trackEnded(trackId) {
-        this.send('track_ended', { track_id: trackId });
+    trackEnded(trackId, trackUid = null) {
+        this.send('track_ended', { track_id: trackId, track_uid: trackUid });
     }
 
     toggleDjMode() {
@@ -153,9 +198,10 @@ class RoomSocket {
     }
 
     disconnect() {
+        this.manualClose = true;
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.ws) {
-            try { this.ws.close(); } catch (e) {}
+            try { this.ws.close(1000, 'Client left room'); } catch (e) {}
         }
         this.isConnected = false;
     }

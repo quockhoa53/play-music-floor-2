@@ -12,6 +12,10 @@ env/
 .env
 .env.local
 
+# Local SQLite database
+data/
+scripts/
+
 # IDE & OS
 .vscode/
 .idea/

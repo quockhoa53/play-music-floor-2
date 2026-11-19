@@ -174,10 +174,21 @@
                                             <span>Tạo phòng</span>
                                         </button>
                                     </div>
-                                    <label class="inline-flex items-center gap-2.5 cursor-pointer select-none pt-0.5">
-                                        <input type="checkbox" id="create-room-dj-mode" class="w-4 h-4 rounded accent-indigo-600">
-                                        <span class="text-xs text-sub">Bật chế độ DJ (chỉ Chủ phòng có quyền tạm dừng / chuyển bài)</span>
-                                    </label>
+                                    <div class="flex flex-col gap-2 pt-0.5">
+                                        <label class="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                                            <input type="checkbox" id="create-room-dj-mode" class="w-4 h-4 rounded accent-indigo-600">
+                                            <span class="text-xs text-sub">Bật chế độ DJ (chỉ Chủ phòng có quyền tạm dừng / chuyển bài)</span>
+                                        </label>
+                                        <label class="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                                            <input type="checkbox" id="create-room-private" class="w-4 h-4 rounded accent-indigo-600">
+                                            <span class="text-xs text-sub">🔒 Phòng riêng tư (ẩn khỏi danh sách, cần link mời hoặc mật khẩu)</span>
+                                        </label>
+                                        <div id="create-room-passcode-wrap" class="hidden pt-1">
+                                            <input type="password" id="create-room-passcode" maxlength="64" autocomplete="new-password"
+                                                class="input-field w-full sm:w-72 px-3.5 py-2 rounded-xl text-xs font-medium"
+                                                placeholder="Mật khẩu phòng (tùy chọn, tối thiểu 4 ký tự)...">
+                                        </div>
+                                    </div>
                                 </form>
                             </div>
 
@@ -241,6 +252,7 @@
                                 class="px-2 py-0.5 rounded-md surface-subtle text-sub hover:text-indigo-600 dark:hover:text-indigo-400 text-[11px] font-mono-num font-semibold flex-shrink-0 cursor-pointer">
                                 #id
                             </button>
+                            <span id="room-private-badge" class="hidden px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-[10px] font-bold flex-shrink-0">🔒 Riêng tư</span>
                             <div id="user-role-badge" class="hidden sm:block flex-shrink-0"></div>
                         </div>
                     </div>
@@ -299,6 +311,13 @@
                     <button type="button" id="btn-header-radio-toggle" class="surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main inline-flex items-center gap-1.5" title="Bật/Tắt chế độ Radio (nghe nhạc không cần xem video)">
                         <svg class="w-3.5 h-3.5 text-pink-500" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
                         <span class="hidden md:inline js-header-radio-label">Radio</span>
+                    </button>
+
+                    <!-- Quick Chat Minimize/Expand Toggle -->
+                    <button type="button" id="btn-header-chat-toggle" class="relative surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main inline-flex items-center gap-1.5" title="Thu nhỏ / Mở rộng khung chat">
+                        <svg class="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                        <span class="hidden xl:inline js-header-chat-label">Chat</span>
+                        <span class="js-chat-unread-badge hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center shadow">0</span>
                     </button>
 
                     <!-- DJ Mode (Host only) -->
@@ -502,7 +521,7 @@
 
                         <!-- Bottom Controls Row -->
                         <div class="mt-3.5 flex flex-wrap items-center justify-between gap-3">
-                            <div class="flex items-center gap-2">
+                            <div class="flex items-center gap-3">
                                 <!-- Play / Pause Glowing Orb -->
                                 <button type="button" id="btn-play-pause"
                                     class="btn-gradient w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0"
@@ -511,21 +530,7 @@
                                         <path d="M8 5.14v14l11-7-11-7z" fill="currentColor"/>
                                     </svg>
                                 </button>
-
-                                <!-- Vote Skip -->
-                                <button type="button" id="btn-vote-skip"
-                                    class="surface-subtle px-3.5 py-2 rounded-xl text-xs font-semibold text-main inline-flex items-center gap-1.5"
-                                    title="Bỏ phiếu chuyển bài tiếp theo">
-                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
-                                    <span class="js-skip-label">Bỏ qua (0/1)</span>
-                                </button>
-
-                                <!-- Host Force Skip -->
-                                <button type="button" id="btn-force-skip"
-                                    class="hidden px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-600 dark:text-amber-400 text-xs font-bold inline-flex items-center gap-1 transition"
-                                    title="Chủ phòng chuyển bài ngay lập tức">
-                                    <span>Skip ngay</span>
-                                </button>
+                                <span class="text-xs font-medium text-sub hidden sm:inline">Phát tuần tự theo danh sách chờ</span>
                             </div>
 
                             <!-- Local Volume -->
@@ -566,6 +571,44 @@
                         <span id="queue-duration-badge" class="text-[11px] font-medium text-dim">Phát theo thứ tự thêm</span>
                     </div>
 
+                    <!-- LIVE SONG PRIORITY VOTE BANNER -->
+                    <div id="priority-vote-banner" class="hidden mb-4 p-3.5 rounded-2xl border border-amber-500/35 bg-gradient-to-r from-amber-500/12 via-orange-500/10 to-indigo-500/10 shadow-sm">
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div class="flex items-center gap-3 min-w-0 flex-1">
+                                <div class="relative w-14 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-slate-900 ring-1 ring-amber-500/40">
+                                    <img id="priority-banner-thumb" src="" alt="" class="w-full h-full object-cover">
+                                    <span class="absolute top-0.5 left-0.5 px-1 rounded bg-amber-500 text-slate-950 text-[9px] font-extrabold leading-tight">⚡ #1</span>
+                                </div>
+                                <div class="min-w-0 flex-1">
+                                    <div class="flex items-center gap-1.5 flex-wrap">
+                                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300 text-[10px] font-extrabold uppercase tracking-wide">
+                                            ⚡ Bình chọn ưu tiên
+                                        </span>
+                                        <span id="priority-banner-requester" class="text-[11px] text-sub truncate"></span>
+                                    </div>
+                                    <h5 id="priority-banner-title" class="text-xs sm:text-[13px] font-bold text-main truncate mt-0.5"></h5>
+                                </div>
+                            </div>
+
+                            <div class="flex items-center gap-2 flex-shrink-0">
+                                <button type="button" id="btn-vote-priority" class="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-extrabold transition shadow-sm flex items-center gap-1.5">
+                                    <span>⚡ Đồng ý ưu tiên</span>
+                                </button>
+                                <button type="button" id="btn-cancel-priority" class="hidden px-2.5 py-1.5 rounded-xl surface-subtle text-sub hover:text-rose-500 text-xs font-bold transition" title="Hủy yêu cầu ưu tiên">
+                                    Hủy
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="mt-2.5 flex items-center gap-2.5">
+                            <div class="flex-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                                <div id="priority-banner-progress" class="h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500 transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                            <span id="priority-banner-count" class="text-[11px] font-bold font-mono-num text-amber-600 dark:text-amber-300 flex-shrink-0">0/0 phiếu</span>
+                            <span id="priority-banner-countdown" class="text-[11px] font-mono-num text-dim flex-shrink-0">60s</span>
+                        </div>
+                    </div>
+
                     <!-- Queue Pane -->
                     <div id="tab-pane-queue">
                         <div id="playlist-queue-list" class="space-y-2 max-h-96 overflow-y-auto pr-1"></div>
@@ -583,12 +626,12 @@
 
             </div>
 
-            <!-- RIGHT SIDEBAR: REALTIME CHAT & MEMBERS -->
-            <aside class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[42vh] lg:h-full min-h-0 overflow-hidden z-20">
+            <!-- RIGHT SIDEBAR: REALTIME CHAT & MEMBERS (COLLAPSIBLE) -->
+            <aside id="chat-sidebar" class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[44vh] lg:h-full min-h-0 overflow-hidden z-20 transition-all duration-200">
 
-                <!-- Segmented Sidebar Tabs -->
-                <div class="p-3 border-b border-theme flex items-center justify-between flex-shrink-0">
-                    <div class="segmented-track p-1 rounded-xl grid grid-cols-2 w-full gap-1">
+                <!-- Segmented Sidebar Tabs + Minimize Button -->
+                <div class="p-3 border-b border-theme flex items-center justify-between gap-2 flex-shrink-0">
+                    <div class="segmented-track p-1 rounded-xl grid grid-cols-2 flex-1 gap-1">
                         <button type="button" id="tab-btn-chat" class="segmented-btn active py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
                             <span>Chat trực tiếp</span>
@@ -598,14 +641,72 @@
                             <span>Thành viên (<span id="members-count-badge">1</span>)</span>
                         </button>
                     </div>
+
+                    <!-- Minimize Chat Button -->
+                    <button type="button" id="btn-minimize-chat" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center text-sub hover:text-main flex-shrink-0" title="Thu nhỏ cuộc trò chuyện">
+                        <svg class="w-4 h-4 hidden lg:block" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+                        <svg class="w-4 h-4 lg:hidden" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
                 </div>
 
                 <!-- CHAT PANE -->
-                <div id="tab-pane-chat" class="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <div id="tab-pane-chat" class="relative flex-1 min-h-0 flex flex-col overflow-hidden">
                     <div id="chat-messages-container" class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3.5 space-y-1"></div>
 
+                    <!-- EMOJI / ICON PICKER POPOVER -->
+                    <div id="emoji-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
+                        <div class="flex items-center justify-between mb-2 pb-1.5 border-b border-theme">
+                            <div id="emoji-category-tabs" class="flex items-center gap-1">
+                                <!-- Rendered via app.js -->
+                            </div>
+                            <button type="button" id="btn-close-emoji-picker" class="w-6 h-6 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs">✕</button>
+                        </div>
+                        <div id="emoji-picker-grid" class="grid grid-cols-8 gap-1 max-h-44 overflow-y-auto pr-0.5">
+                            <!-- Rendered via app.js -->
+                        </div>
+                    </div>
+
+                    <!-- GIF PICKER POPOVER -->
+                    <div id="gif-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="relative flex-1">
+                                <input type="text" id="gif-search-input" autocomplete="off"
+                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-xs font-medium"
+                                    placeholder="Tìm ảnh GIF (dance, cat, chill, love...)">
+                                <span id="gif-search-spinner" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-indigo-500">
+                                    <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                                </span>
+                            </div>
+                            <button type="button" id="btn-close-gif-picker" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
+                        </div>
+                        <!-- Quick GIF Filter Chips -->
+                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2">
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">🔥 Nổi bật</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cat dance">🐱 Mèo</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music vibe">🎵 Quẩy</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="love heart">❤️ Tim</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="haha laugh">😂 Haha</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="chill coffee">☕ Chill</button>
+                        </div>
+                        <div id="gif-results-grid" class="grid grid-cols-2 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- PENDING IMAGE UPLOAD PREVIEW BAR -->
+                    <div id="chat-image-preview-bar" class="hidden px-3 py-2 border-t border-theme flex items-center justify-between gap-2.5 flex-shrink-0 bg-indigo-500/5">
+                        <div class="flex items-center gap-2.5 min-w-0">
+                            <img id="chat-image-preview-thumb" src="" alt="Xem trước" class="w-11 h-11 rounded-xl object-cover border border-theme shadow-sm flex-shrink-0">
+                            <div class="min-w-0">
+                                <p id="chat-image-preview-name" class="text-xs font-semibold text-main truncate">Ảnh đính kèm</p>
+                                <p class="text-[10px] text-sub">Nhấn Gửi để đăng hình ảnh vào phòng</p>
+                            </div>
+                        </div>
+                        <button type="button" id="btn-cancel-chat-image" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-rose-500 flex items-center justify-center text-xs flex-shrink-0" title="Hủy ảnh">✕</button>
+                    </div>
+
                     <!-- Tactile Floating Reaction Bar -->
-                    <div class="px-3 py-2 border-t border-theme flex items-center justify-between gap-1 overflow-x-auto no-scrollbar flex-shrink-0">
+                    <div class="px-3 py-1.5 border-t border-theme flex items-center justify-between gap-1 overflow-x-auto no-scrollbar flex-shrink-0">
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="❤️" title="Thả tim">❤️</button>
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🔥" title="Quá cháy">🔥</button>
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="🎵" title="Nhạc hay">🎵</button>
@@ -616,17 +717,32 @@
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="😂" title="Haha">😂</button>
                     </div>
 
-                    <!-- Chat Composer -->
-                    <form id="chat-input-form" class="p-3 border-t border-theme flex-shrink-0">
-                        <div class="relative flex items-center gap-2">
-                            <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
-                                class="input-field flex-1 pl-4 pr-11 py-2.5 rounded-full text-xs md:text-sm"
-                                placeholder="Nhắn tin với mọi người...">
-                            <button type="submit"
-                                class="btn-gradient absolute right-1.5 w-8 h-8 rounded-full flex items-center justify-center"
-                                title="Gửi tin nhắn">
-                                <svg class="w-4 h-4 translate-x-[1px]" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                    <!-- Rich Chat Composer (Emoji + GIF + Image Upload + Text) -->
+                    <form id="chat-input-form" class="p-2.5 border-t border-theme flex-shrink-0">
+                        <input type="file" id="chat-image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
+                        <div class="flex items-center gap-1.5">
+                            <!-- Media & Icon Buttons -->
+                            <button type="button" id="btn-toggle-emoji-picker" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-base flex-shrink-0" title="Chèn Icon / Emoji">
+                                😊
                             </button>
+                            <button type="button" id="btn-toggle-gif-picker" class="surface-subtle h-9 px-2 rounded-full flex items-center justify-center text-[11px] font-extrabold tracking-tight text-indigo-600 dark:text-indigo-400 flex-shrink-0" title="Gửi ảnh GIF động">
+                                GIF
+                            </button>
+                            <button type="button" id="btn-chat-upload-image" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-sub hover:text-indigo-500 flex-shrink-0" title="Gửi hình ảnh (hoặc dán Ctrl+V)">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                            </button>
+
+                            <!-- Text Input + Send Button -->
+                            <div class="relative flex-1 flex items-center min-w-0">
+                                <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
+                                    class="input-field w-full pl-3.5 pr-10 py-2 rounded-full text-xs md:text-sm"
+                                    placeholder="Nhắn tin, dán ảnh...">
+                                <button type="submit" id="btn-chat-send"
+                                    class="btn-gradient absolute right-1 w-8 h-8 rounded-full flex items-center justify-center"
+                                    title="Gửi tin nhắn">
+                                    <svg class="w-4 h-4 translate-x-[1px]" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                                </button>
+                            </div>
                         </div>
                     </form>
                 </div>
@@ -638,6 +754,48 @@
 
             </aside>
 
+        </div>
+
+        <!-- FLOATING EXPAND CHAT BUTTON (Shown when Chat Sidebar is minimized) -->
+        <button type="button" id="btn-expand-chat-fab"
+            class="hidden fixed bottom-5 right-5 z-30 btn-gradient pl-4 pr-4 py-3 rounded-full shadow-2xl flex items-center gap-2 text-xs font-bold">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+            <span>Mở trò chuyện</span>
+            <span class="js-chat-unread-badge hidden min-w-[20px] h-[20px] px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center">0</span>
+        </button>
+    </div>
+
+    <!-- Image / GIF Lightbox Modal -->
+    <div id="image-lightbox-modal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+        <button type="button" id="btn-close-lightbox" class="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center text-lg transition">✕</button>
+        <div class="max-w-4xl max-h-[88vh] flex flex-col items-center gap-3">
+            <img id="lightbox-img" src="" alt="" class="max-w-full max-h-[80vh] rounded-2xl shadow-2xl object-contain">
+            <span id="lightbox-caption" class="text-xs text-white/80 font-medium"></span>
+        </div>
+    </div>
+
+    <!-- Private Room Passcode Modal -->
+    <div id="passcode-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="surface-dropdown max-w-sm w-full rounded-3xl p-6 space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-base font-bold text-main flex items-center gap-2">
+                    <span>🔒</span> Phòng riêng tư
+                </h3>
+                <button type="button" id="btn-close-passcode-modal" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs">✕</button>
+            </div>
+            <p id="passcode-modal-desc" class="text-xs text-sub leading-relaxed">
+                Phòng này được bảo vệ. Vui lòng nhập mật khẩu để tham gia.
+            </p>
+            <form id="passcode-modal-form" class="space-y-3">
+                <input type="password" id="passcode-modal-input" maxlength="64" autocomplete="current-password"
+                    class="input-field w-full px-4 py-2.5 rounded-xl text-sm font-medium"
+                    placeholder="Nhập mật khẩu phòng...">
+                <p id="passcode-modal-error" class="hidden text-xs text-rose-500 font-medium"></p>
+                <div class="flex items-center justify-end gap-2 pt-1">
+                    <button type="button" id="btn-cancel-passcode-modal" class="surface-subtle px-4 py-2 rounded-xl text-xs font-semibold text-sub">Hủy</button>
+                    <button type="submit" class="btn-gradient px-5 py-2 rounded-xl text-xs font-bold">Xác nhận vào phòng</button>
+                </div>
+            </form>
         </div>
     </div>
 

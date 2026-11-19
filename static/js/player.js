@@ -54,7 +54,7 @@ class SyncPlayer {
 
         this.audioEl.addEventListener('ended', () => {
             if (this.useAudioFallback && this.currentTrack) {
-                window.roomSocket.trackEnded(this.currentTrack.id);
+                window.roomSocket.trackEnded(this.currentTrack.id, this.currentTrack.uid);
             }
         });
 
@@ -111,7 +111,7 @@ class SyncPlayer {
         const state = event.data;
         if (state === YT.PlayerState.ENDED) {
             if (this.currentTrack) {
-                window.roomSocket.trackEnded(this.currentTrack.id);
+                window.roomSocket.trackEnded(this.currentTrack.id, this.currentTrack.uid);
             }
         } else if (state === YT.PlayerState.PLAYING) {
             const curTime = this.getCurrentTime();
@@ -532,7 +532,10 @@ class SyncPlayer {
         }
 
         const isPlaying = this.status === 'playing';
-        const thumbUrl = this.currentTrack.thumbnail || `https://i.ytimg.com/vi/${this.currentTrack.id}/hqdefault.jpg`;
+        const safeVid = /^[a-zA-Z0-9_-]{11}$/.test(this.currentTrack.id || '') ? this.currentTrack.id : '';
+        const thumbUrl = safeVid
+            ? `https://i.ytimg.com/vi/${safeVid}/hqdefault.jpg`
+            : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80';
 
         if (titleEl) titleEl.textContent = this.currentTrack.title;
         if (authorEl) authorEl.textContent = this.currentTrack.author || 'YouTube';

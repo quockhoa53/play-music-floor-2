@@ -1,0 +1,692 @@
+"""Persistent database layer: Supabase PostgreSQL (DATABASE_URL) -> Supabase REST (Secret Key) -> Local SQLite."""
+import asyncio
+import base64
+import json
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import httpx
+
+SCHEMA_STATEMENTS_SQLITE = [
+    """
+    CREATE TABLE IF NOT EXISTS rooms (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        host_id TEXT NOT NULL DEFAULT '',
+        dj_mode INTEGER NOT NULL DEFAULT 0,
+        is_private INTEGER NOT NULL DEFAULT 0,
+        passcode_hash TEXT NOT NULL DEFAULT '',
+        invite_token TEXT NOT NULL DEFAULT '',
+        current_track_json TEXT,
+        status TEXT NOT NULL DEFAULT 'idle',
+        playback_time REAL NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS room_queue (
+        uid TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        video_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT 'YouTube',
+        thumbnail TEXT NOT NULL DEFAULT '',
+        duration INTEGER NOT NULL DEFAULT 0,
+        duration_str TEXT NOT NULL DEFAULT '',
+        added_by_id TEXT NOT NULL DEFAULT '',
+        added_by_name TEXT NOT NULL DEFAULT 'Khách',
+        added_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_room_queue_room_pos ON room_queue (room_id, position ASC)",
+    """
+    CREATE TABLE IF NOT EXISTS room_history (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        video_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT 'YouTube',
+        thumbnail TEXT NOT NULL DEFAULT '',
+        duration INTEGER NOT NULL DEFAULT 0,
+        duration_str TEXT NOT NULL DEFAULT '',
+        added_by_id TEXT NOT NULL DEFAULT '',
+        added_by_name TEXT NOT NULL DEFAULT 'Khách',
+        played_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_room_history_room_time ON room_history (room_id, played_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS room_messages (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        msg_type TEXT NOT NULL DEFAULT 'chat',
+        user_id TEXT NOT NULL DEFAULT '',
+        user_name TEXT NOT NULL DEFAULT '',
+        user_avatar TEXT NOT NULL DEFAULT '🎧',
+        user_color TEXT NOT NULL DEFAULT '#4f46e5',
+        is_host INTEGER NOT NULL DEFAULT 0,
+        text TEXT NOT NULL DEFAULT '',
+        media_type TEXT,
+        media_url TEXT,
+        created_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_room_messages_room_time ON room_messages (room_id, created_at ASC)",
+    """
+    CREATE TABLE IF NOT EXISTS chat_media (
+        id TEXT PRIMARY KEY,
+        mime_type TEXT NOT NULL,
+        data_b64 TEXT NOT NULL,
+        uploader_id TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chat_media_created ON chat_media (created_at DESC)",
+]
+
+
+class DatabaseManager:
+    """Unified async-safe persistence layer supporting Postgres, Supabase REST, and SQLite fallback."""
+
+    def __init__(self, sqlite_path: Optional[str] = None):
+        self.backend_name: str = "memory"
+        self.connected: bool = False
+        self.database_url: str = ""
+        self.supabase_url: str = ""
+        self.supabase_secret_key: str = ""
+        self.sqlite_path: str = sqlite_path or os.getenv("SQLITE_DB_PATH") or str(
+            Path(__file__).resolve().parent.parent / "data" / "floor2.db"
+        )
+        self._sqlite_lock = threading.Lock()
+        self._sqlite_conn: Optional[sqlite3.Connection] = None
+        self._rest_client: Optional[httpx.Client] = None
+
+    def init(self):
+        """Initialize the best available database backend (Postgres > Supabase REST > SQLite)."""
+        self.database_url = (os.getenv("DATABASE_URL") or "").strip()
+        self.supabase_url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+        self.supabase_secret_key = (
+            os.getenv("SUPABASE_SECRET_KEY")
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or ""
+        ).strip()
+
+        # 1. Priority 1: Direct Supabase / PostgreSQL via DATABASE_URL
+        if self.database_url:
+            try:
+                self._init_postgres()
+                self.backend_name = "postgres"
+                self.connected = True
+                print("[DB] Connected to PostgreSQL (DATABASE_URL)")
+                return
+            except Exception as e:
+                print(f"[DB] PostgreSQL init failed ({e}), trying fallback...")
+
+        # 2. Priority 2: Supabase PostgREST via SUPABASE_URL + SUPABASE_SECRET_KEY
+        if self.supabase_url and self.supabase_secret_key:
+            try:
+                self._init_supabase_rest()
+                self.backend_name = "supabase_rest"
+                self.connected = True
+                print(f"[DB] Connected to Supabase REST ({self.supabase_url})")
+                return
+            except Exception as e:
+                print(f"[DB] Supabase REST init failed ({e}), falling back to SQLite...")
+
+        # 3. Priority 3: Local SQLite fallback (works out-of-the-box offline & local)
+        try:
+            self._init_sqlite()
+            self.backend_name = "sqlite"
+            self.connected = True
+            print(f"[DB] Using local SQLite persistence ({self.sqlite_path})")
+        except Exception as e:
+            print(f"[DB] SQLite init failed ({e}), running in-memory only")
+            self.backend_name = "memory"
+            self.connected = False
+
+    def close(self):
+        if self._sqlite_conn:
+            try:
+                self._sqlite_conn.close()
+            except Exception:
+                pass
+            self._sqlite_conn = None
+        if self._rest_client:
+            try:
+                self._rest_client.close()
+            except Exception:
+                pass
+            self._rest_client = None
+
+    # ------------------------------------------------------------------
+    # BACKEND INITIALIZERS
+    # ------------------------------------------------------------------
+    def _pg_connect(self):
+        import psycopg
+        return psycopg.connect(self.database_url, autocommit=True, connect_timeout=8)
+
+    def _init_postgres(self):
+        # Schema is managed externally via supabase_schema.sql; only verify connection & table presence.
+        with self._pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM rooms LIMIT 1")
+
+    def _init_supabase_rest(self):
+        self._rest_client = httpx.Client(
+            base_url=f"{self.supabase_url}/rest/v1",
+            headers={
+                "apikey": self.supabase_secret_key,
+                "Authorization": f"Bearer {self.supabase_secret_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=8.0,
+        )
+        # Verify 'rooms' table exists & secret key is valid
+        r = self._rest_client.get("/rooms", params={"select": "id", "limit": "1"})
+        if r.status_code != 200:
+            raise RuntimeError(f"Supabase REST check returned HTTP {r.status_code}: {r.text[:180]}")
+
+    def _init_sqlite(self):
+        db_file = Path(self.sqlite_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        self._sqlite_conn = sqlite3.connect(str(db_file), check_same_thread=False)
+        self._sqlite_conn.row_factory = sqlite3.Row
+        with self._sqlite_lock:
+            self._sqlite_conn.execute("PRAGMA foreign_keys = ON")
+            self._sqlite_conn.execute("PRAGMA journal_mode = WAL")
+            for stmt in SCHEMA_STATEMENTS_SQLITE:
+                self._sqlite_conn.execute(stmt)
+            cols = {row[1] for row in self._sqlite_conn.execute("PRAGMA table_info(rooms)").fetchall()}
+            if "playback_time" not in cols:
+                self._sqlite_conn.execute("ALTER TABLE rooms ADD COLUMN playback_time DOUBLE PRECISION NOT NULL DEFAULT 0")
+            self._sqlite_conn.commit()
+
+    def health_info(self) -> Dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "connected": self.connected,
+            "supabase_configured": bool(self.database_url or (self.supabase_url and self.supabase_secret_key)),
+        }
+
+    # ------------------------------------------------------------------
+    # LOAD ALL ROOMS ON STARTUP
+    # ------------------------------------------------------------------
+    def load_all_rooms(self) -> List[Dict[str, Any]]:
+        if not self.connected:
+            return []
+        try:
+            if self.backend_name == "postgres":
+                return self._pg_load_all_rooms()
+            if self.backend_name == "supabase_rest":
+                return self._rest_load_all_rooms()
+            if self.backend_name == "sqlite":
+                return self._sqlite_load_all_rooms()
+        except Exception as e:
+            print(f"[DB] load_all_rooms error: {e}")
+        return []
+
+    def _build_room_record(self, row: Dict[str, Any], queue: List[Dict], history: List[Dict], messages: List[Dict]) -> Dict[str, Any]:
+        current_track = None
+        raw_ct = row.get("current_track_json")
+        if raw_ct:
+            try:
+                current_track = json.loads(raw_ct) if isinstance(raw_ct, str) else raw_ct
+            except Exception:
+                current_track = None
+
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "host_id": row.get("host_id") or "",
+            "dj_mode": bool(row.get("dj_mode")),
+            "is_private": bool(row.get("is_private")),
+            "passcode_hash": row.get("passcode_hash") or "",
+            "invite_token": row.get("invite_token") or "",
+            "current_track": current_track,
+            "status": row.get("status") or "idle",
+            "current_time": float(row.get("playback_time") if row.get("playback_time") is not None else (row.get("current_time") or 0.0)),
+            "updated_at": float(row.get("updated_at") or time.time()),
+            "created_at": float(row.get("created_at") or time.time()),
+            "queue": queue,
+            "history": history,
+            "messages": messages,
+        }
+
+    def _pg_load_all_rooms(self) -> List[Dict[str, Any]]:
+        from psycopg.rows import dict_row
+        result = []
+        with self._pg_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM rooms ORDER BY created_at ASC")
+                room_rows = cur.fetchall()
+                for r in room_rows:
+                    rid = r["id"]
+                    cur.execute("SELECT * FROM room_queue WHERE room_id = %s ORDER BY position ASC", (rid,))
+                    q_rows = cur.fetchall()
+                    cur.execute("SELECT * FROM room_history WHERE room_id = %s ORDER BY played_at DESC LIMIT 30", (rid,))
+                    h_rows = list(reversed(cur.fetchall()))
+                    cur.execute("SELECT * FROM room_messages WHERE room_id = %s ORDER BY created_at DESC LIMIT 100", (rid,))
+                    m_rows = list(reversed(cur.fetchall()))
+                    result.append(self._build_room_record(r, q_rows, h_rows, m_rows))
+        return result
+
+    def _sqlite_load_all_rooms(self) -> List[Dict[str, Any]]:
+        if not self._sqlite_conn:
+            return []
+        result = []
+        with self._sqlite_lock:
+            cur = self._sqlite_conn.cursor()
+            room_rows = [dict(x) for x in cur.execute("SELECT * FROM rooms ORDER BY created_at ASC").fetchall()]
+            for r in room_rows:
+                rid = r["id"]
+                q_rows = [dict(x) for x in cur.execute("SELECT * FROM room_queue WHERE room_id = ? ORDER BY position ASC", (rid,)).fetchall()]
+                h_rows = list(reversed([dict(x) for x in cur.execute("SELECT * FROM room_history WHERE room_id = ? ORDER BY played_at DESC LIMIT 30", (rid,)).fetchall()]))
+                m_rows = list(reversed([dict(x) for x in cur.execute("SELECT * FROM room_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 100", (rid,)).fetchall()]))
+                result.append(self._build_room_record(r, q_rows, h_rows, m_rows))
+        return result
+
+    def _rest_load_all_rooms(self) -> List[Dict[str, Any]]:
+        if not self._rest_client:
+            return []
+        result = []
+        r = self._rest_client.get("/rooms", params={"select": "*", "order": "created_at.asc"})
+        r.raise_for_status()
+        for row in r.json():
+            rid = row["id"]
+            rq = self._rest_client.get("/room_queue", params={"room_id": f"eq.{rid}", "order": "position.asc"})
+            rh = self._rest_client.get("/room_history", params={"room_id": f"eq.{rid}", "order": "played_at.desc", "limit": "30"})
+            rm = self._rest_client.get("/room_messages", params={"room_id": f"eq.{rid}", "order": "created_at.desc", "limit": "100"})
+            q_rows = rq.json() if rq.status_code == 200 else []
+            h_rows = list(reversed(rh.json())) if rh.status_code == 200 else []
+            m_rows = list(reversed(rm.json())) if rm.status_code == 200 else []
+            result.append(self._build_room_record(row, q_rows, h_rows, m_rows))
+        return result
+
+    # ------------------------------------------------------------------
+    # WRITE OPERATIONS (SYNC HELPERS + NON-BLOCKING ASYNC WRAPPERS)
+    # ------------------------------------------------------------------
+    def save_room_sync(self, room_data: Dict[str, Any]):
+        if not self.connected:
+            return
+        ct_json = json.dumps(room_data["current_track"], ensure_ascii=False) if room_data.get("current_track") else None
+        vals = {
+            "id": room_data["id"],
+            "name": room_data["name"],
+            "host_id": room_data.get("host_id", ""),
+            "dj_mode": bool(room_data.get("dj_mode", False)),
+            "is_private": bool(room_data.get("is_private", False)),
+            "passcode_hash": room_data.get("passcode_hash", ""),
+            "invite_token": room_data.get("invite_token", ""),
+            "current_track_json": ct_json,
+            "status": room_data.get("status", "idle"),
+            "playback_time": float(room_data.get("current_time", 0.0)),
+            "updated_at": float(room_data.get("updated_at", time.time())),
+            "created_at": float(room_data.get("created_at", time.time())),
+        }
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO rooms (id, name, host_id, dj_mode, is_private, passcode_hash, invite_token,
+                                current_track_json, status, playback_time, updated_at, created_at)
+                            VALUES (%(id)s, %(name)s, %(host_id)s, %(dj_mode)s, %(is_private)s, %(passcode_hash)s,
+                                %(invite_token)s, %(current_track_json)s, %(status)s, %(playback_time)s, %(updated_at)s, %(created_at)s)
+                            ON CONFLICT (id) DO UPDATE SET
+                                name = EXCLUDED.name,
+                                host_id = EXCLUDED.host_id,
+                                dj_mode = EXCLUDED.dj_mode,
+                                is_private = EXCLUDED.is_private,
+                                passcode_hash = EXCLUDED.passcode_hash,
+                                invite_token = EXCLUDED.invite_token,
+                                current_track_json = EXCLUDED.current_track_json,
+                                status = EXCLUDED.status,
+                                playback_time = EXCLUDED.playback_time,
+                                updated_at = EXCLUDED.updated_at
+                            """,
+                            vals,
+                        )
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    self._sqlite_conn.execute(
+                        """
+                        INSERT INTO rooms (id, name, host_id, dj_mode, is_private, passcode_hash, invite_token,
+                            current_track_json, status, playback_time, updated_at, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            name = excluded.name,
+                            host_id = excluded.host_id,
+                            dj_mode = excluded.dj_mode,
+                            is_private = excluded.is_private,
+                            passcode_hash = excluded.passcode_hash,
+                            invite_token = excluded.invite_token,
+                            current_track_json = excluded.current_track_json,
+                            status = excluded.status,
+                            playback_time = excluded.playback_time,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            vals["id"], vals["name"], vals["host_id"], int(vals["dj_mode"]),
+                            int(vals["is_private"]), vals["passcode_hash"], vals["invite_token"],
+                            vals["current_track_json"], vals["status"], vals["playback_time"],
+                            vals["updated_at"], vals["created_at"],
+                        ),
+                    )
+                    self._sqlite_conn.commit()
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.post(
+                    "/rooms",
+                    headers={"Prefer": "resolution=merge-duplicates"},
+                    json=vals,
+                )
+        except Exception as e:
+            print(f"[DB] save_room error: {e}")
+
+    def replace_queue_sync(self, room_id: str, queue_list: List[Dict[str, Any]]):
+        if not self.connected:
+            return
+        rows = [
+            {
+                "uid": t["uid"],
+                "room_id": room_id,
+                "position": idx,
+                "video_id": t["id"],
+                "title": t["title"],
+                "author": t.get("author", "YouTube"),
+                "thumbnail": t.get("thumbnail", ""),
+                "duration": int(t.get("duration") or 0),
+                "duration_str": t.get("duration_str", ""),
+                "added_by_id": t.get("added_by_id", ""),
+                "added_by_name": t.get("added_by_name", "Khách"),
+                "added_at": float(t.get("added_at") or time.time()),
+            }
+            for idx, t in enumerate(queue_list)
+        ]
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM room_queue WHERE room_id = %s", (room_id,))
+                        for r in rows:
+                            cur.execute(
+                                """
+                                INSERT INTO room_queue (uid, room_id, position, video_id, title, author, thumbnail,
+                                    duration, duration_str, added_by_id, added_by_name, added_at)
+                                VALUES (%(uid)s, %(room_id)s, %(position)s, %(video_id)s, %(title)s, %(author)s,
+                                    %(thumbnail)s, %(duration)s, %(duration_str)s, %(added_by_id)s, %(added_by_name)s, %(added_at)s)
+                                """,
+                                r,
+                            )
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    self._sqlite_conn.execute("DELETE FROM room_queue WHERE room_id = ?", (room_id,))
+                    for r in rows:
+                        self._sqlite_conn.execute(
+                            """
+                            INSERT INTO room_queue (uid, room_id, position, video_id, title, author, thumbnail,
+                                duration, duration_str, added_by_id, added_by_name, added_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                r["uid"], r["room_id"], r["position"], r["video_id"], r["title"], r["author"],
+                                r["thumbnail"], r["duration"], r["duration_str"], r["added_by_id"], r["added_by_name"], r["added_at"],
+                            ),
+                        )
+                    self._sqlite_conn.commit()
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.delete("/room_queue", params={"room_id": f"eq.{room_id}"})
+                if rows:
+                    self._rest_client.post("/room_queue", json=rows)
+        except Exception as e:
+            print(f"[DB] replace_queue error: {e}")
+
+    def add_history_sync(self, room_id: str, track: Dict[str, Any]):
+        if not self.connected:
+            return
+        row = {
+            "id": f"{track['uid']}_{int(time.time() * 1000)}",
+            "room_id": room_id,
+            "video_id": track["id"],
+            "title": track["title"],
+            "author": track.get("author", "YouTube"),
+            "thumbnail": track.get("thumbnail", ""),
+            "duration": int(track.get("duration") or 0),
+            "duration_str": track.get("duration_str", ""),
+            "added_by_id": track.get("added_by_id", ""),
+            "added_by_name": track.get("added_by_name", "Khách"),
+            "played_at": time.time(),
+        }
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO room_history (id, room_id, video_id, title, author, thumbnail,
+                                duration, duration_str, added_by_id, added_by_name, played_at)
+                            VALUES (%(id)s, %(room_id)s, %(video_id)s, %(title)s, %(author)s, %(thumbnail)s,
+                                %(duration)s, %(duration_str)s, %(added_by_id)s, %(added_by_name)s, %(played_at)s)
+                            """,
+                            row,
+                        )
+                        cur.execute(
+                            """
+                            DELETE FROM room_history
+                            WHERE room_id = %s AND id NOT IN (
+                                SELECT id FROM room_history WHERE room_id = %s ORDER BY played_at DESC LIMIT 50
+                            )
+                            """,
+                            (room_id, room_id),
+                        )
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    self._sqlite_conn.execute(
+                        """
+                        INSERT INTO room_history (id, room_id, video_id, title, author, thumbnail,
+                            duration, duration_str, added_by_id, added_by_name, played_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row["id"], row["room_id"], row["video_id"], row["title"], row["author"], row["thumbnail"],
+                            row["duration"], row["duration_str"], row["added_by_id"], row["added_by_name"], row["played_at"],
+                        ),
+                    )
+                    self._sqlite_conn.execute(
+                        """
+                        DELETE FROM room_history
+                        WHERE room_id = ? AND id NOT IN (
+                            SELECT id FROM room_history WHERE room_id = ? ORDER BY played_at DESC LIMIT 50
+                        )
+                        """,
+                        (room_id, room_id),
+                    )
+                    self._sqlite_conn.commit()
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.post("/room_history", json=row)
+        except Exception as e:
+            print(f"[DB] add_history error: {e}")
+
+    def add_message_sync(self, room_id: str, msg: Dict[str, Any]):
+        if not self.connected:
+            return
+        row = {
+            "id": f"{msg.get('id', 'm')}_{int(time.time() * 1000000) % 1000000}",
+            "room_id": room_id,
+            "msg_type": msg.get("type", "chat"),
+            "user_id": msg.get("user_id", ""),
+            "user_name": msg.get("user_name", ""),
+            "user_avatar": msg.get("user_avatar", "🎧"),
+            "user_color": msg.get("user_color", "#4f46e5"),
+            "is_host": bool(msg.get("is_host", False)),
+            "text": msg.get("text", ""),
+            "media_type": msg.get("media_type"),
+            "media_url": msg.get("media_url"),
+            "created_at": float(msg.get("timestamp") or time.time()),
+        }
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO room_messages (id, room_id, msg_type, user_id, user_name, user_avatar,
+                                user_color, is_host, text, media_type, media_url, created_at)
+                            VALUES (%(id)s, %(room_id)s, %(msg_type)s, %(user_id)s, %(user_name)s, %(user_avatar)s,
+                                %(user_color)s, %(is_host)s, %(text)s, %(media_type)s, %(media_url)s, %(created_at)s)
+                            """,
+                            row,
+                        )
+                        cur.execute(
+                            """
+                            DELETE FROM room_messages
+                            WHERE room_id = %s AND id NOT IN (
+                                SELECT id FROM room_messages WHERE room_id = %s ORDER BY created_at DESC LIMIT 150
+                            )
+                            """,
+                            (room_id, room_id),
+                        )
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    self._sqlite_conn.execute(
+                        """
+                        INSERT INTO room_messages (id, room_id, msg_type, user_id, user_name, user_avatar,
+                            user_color, is_host, text, media_type, media_url, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row["id"], row["room_id"], row["msg_type"], row["user_id"], row["user_name"],
+                            row["user_avatar"], row["user_color"], int(row["is_host"]), row["text"],
+                            row["media_type"], row["media_url"], row["created_at"],
+                        ),
+                    )
+                    self._sqlite_conn.execute(
+                        """
+                        DELETE FROM room_messages
+                        WHERE room_id = ? AND id NOT IN (
+                            SELECT id FROM room_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 150
+                        )
+                        """,
+                        (room_id, room_id),
+                    )
+                    self._sqlite_conn.commit()
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.post("/room_messages", json=row)
+        except Exception as e:
+            print(f"[DB] add_message error: {e}")
+
+    def save_media_sync(self, media_id: str, raw: bytes, mime_type: str, uploader_id: str):
+        if not self.connected:
+            return
+        row = {
+            "id": media_id,
+            "mime_type": mime_type,
+            "data_b64": base64.b64encode(raw).decode("ascii"),
+            "uploader_id": uploader_id,
+            "created_at": time.time(),
+        }
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO chat_media (id, mime_type, data_b64, uploader_id, created_at)
+                            VALUES (%(id)s, %(mime_type)s, %(data_b64)s, %(uploader_id)s, %(created_at)s)
+                            ON CONFLICT (id) DO NOTHING
+                            """,
+                            row,
+                        )
+                        cur.execute(
+                            """
+                            DELETE FROM chat_media
+                            WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 80)
+                            """
+                        )
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    self._sqlite_conn.execute(
+                        "INSERT OR IGNORE INTO chat_media (id, mime_type, data_b64, uploader_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (row["id"], row["mime_type"], row["data_b64"], row["uploader_id"], row["created_at"]),
+                    )
+                    self._sqlite_conn.execute(
+                        "DELETE FROM chat_media WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 80)"
+                    )
+                    self._sqlite_conn.commit()
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.post("/chat_media", json=row)
+        except Exception as e:
+            print(f"[DB] save_media error: {e}")
+
+    def get_media_sync(self, media_id: str) -> Optional[Tuple[bytes, str, str]]:
+        if not self.connected:
+            return None
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT mime_type, data_b64, uploader_id FROM chat_media WHERE id = %s", (media_id,))
+                        row = cur.fetchone()
+                        if row:
+                            return base64.b64decode(row[1]), row[0], row[2]
+            elif self.backend_name == "sqlite" and self._sqlite_conn:
+                with self._sqlite_lock:
+                    row = self._sqlite_conn.execute(
+                        "SELECT mime_type, data_b64, uploader_id FROM chat_media WHERE id = ?", (media_id,)
+                    ).fetchone()
+                    if row:
+                        return base64.b64decode(row["data_b64"]), row["mime_type"], row["uploader_id"]
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                r = self._rest_client.get("/chat_media", params={"id": f"eq.{media_id}", "select": "mime_type,data_b64,uploader_id"})
+                if r.status_code == 200 and r.json():
+                    item = r.json()[0]
+                    return base64.b64decode(item["data_b64"]), item["mime_type"], item["uploader_id"]
+        except Exception as e:
+            print(f"[DB] get_media error: {e}")
+        return None
+
+    # Non-blocking async fire-and-forget helpers for hot WebSocket paths
+    def schedule_save_room(self, room_data: Dict[str, Any]):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.save_room_sync, room_data)
+        except RuntimeError:
+            self.save_room_sync(room_data)
+
+    def schedule_replace_queue(self, room_id: str, queue_list: List[Dict[str, Any]]):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.replace_queue_sync, room_id, queue_list)
+        except RuntimeError:
+            self.replace_queue_sync(room_id, queue_list)
+
+    def schedule_add_history(self, room_id: str, track: Dict[str, Any]):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.add_history_sync, room_id, track)
+        except RuntimeError:
+            self.add_history_sync(room_id, track)
+
+    def schedule_add_message(self, room_id: str, msg: Dict[str, Any]):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.add_message_sync, room_id, msg)
+        except RuntimeError:
+            self.add_message_sync(room_id, msg)
+
+    def schedule_save_media(self, media_id: str, raw: bytes, mime_type: str, uploader_id: str):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.save_media_sync, media_id, raw, mime_type, uploader_id)
+        except RuntimeError:
+            self.save_media_sync(media_id, raw, mime_type, uploader_id)

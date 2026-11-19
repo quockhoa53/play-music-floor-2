@@ -9,16 +9,21 @@ const COLOR_OPTIONS = ['#4f46e5', '#db2777', '#7c3aed', '#059669', '#d97706', '#
 const YT_URL_REGEX = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/|music\.youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})|^([a-zA-Z0-9_-]{11})$/;
 
 window.appState = {
-    userId: localStorage.getItem('floor2_uid') || generateUid(),
+    sessionToken: localStorage.getItem('floor2_session_token') || null,
+    userId: null,
     userName: localStorage.getItem('floor2_uname') || getRandomName(),
-    userAvatar: localStorage.getItem('floor2_avatar') || '🎧',
-    userColor: localStorage.getItem('floor2_color') || '#4f46e5',
+    userAvatar: AVATAR_OPTIONS.includes(localStorage.getItem('floor2_avatar')) ? localStorage.getItem('floor2_avatar') : '🎧',
+    userColor: /^#[0-9a-fA-F]{6}$/.test(localStorage.getItem('floor2_color') || '') ? localStorage.getItem('floor2_color') : '#4f46e5',
     theme: localStorage.getItem('floor2_theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
     roomId: null,
+    inviteToken: null,
     roomData: null,
     isHost: false,
     isVideoHidden: localStorage.getItem('floor2_video_hidden') === 'true',
+    isChatCollapsed: localStorage.getItem('floor2_chat_collapsed') === 'true',
     suggestions: [],
+    pendingPrivateRoomId: null,
+    pendingImageFile: null,
 };
 
 // Realtime search state
@@ -33,10 +38,42 @@ const searchState = {
     cache: new Map(), // client-side instant cache: queryLower -> { ts, results }
 };
 
-function generateUid() {
-    const id = 'u_' + Math.random().toString(36).substring(2, 9);
-    localStorage.setItem('floor2_uid', id);
-    return id;
+function safeColor(val) {
+    return /^#[0-9a-fA-F]{6}$/.test(val || '') ? val : '#4f46e5';
+}
+
+function safeThumbUrl(videoId) {
+    if (typeof videoId === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+        return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    }
+    return 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80';
+}
+
+async function ensureSession(forceNew = false) {
+    if (!forceNew && window.appState.sessionToken && window.appState.userId) {
+        return window.appState.sessionToken;
+    }
+    const headers = { 'Content-Type': 'application/json' };
+    if (!forceNew && window.appState.sessionToken) {
+        headers['X-Session-Token'] = window.appState.sessionToken;
+    }
+    const res = await fetch('/api/session', { method: 'POST', headers });
+    if (!res.ok) {
+        throw new Error('Không thể khởi tạo phiên làm việc bảo mật');
+    }
+    const data = await res.json();
+    window.appState.sessionToken = data.token;
+    window.appState.userId = data.user_id;
+    localStorage.setItem('floor2_session_token', data.token);
+    return data.token;
+}
+
+function getAuthHeaders(extra = {}) {
+    const h = { ...extra };
+    if (window.appState.sessionToken) {
+        h['X-Session-Token'] = window.appState.sessionToken;
+    }
+    return h;
 }
 
 function getRandomName() {
@@ -121,7 +158,7 @@ function showToast(message, type = 'info') {
 // =============================================================================
 // INITIALIZATION
 // =============================================================================
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     applyTheme(window.appState.theme);
 
     document.querySelectorAll('.js-theme-toggle').forEach(btn => {
@@ -129,32 +166,55 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     initLobbyTabs();
+    initPasscodeModal();
     initProfileUI();
     initPlayerListeners();
     initSocketEvents();
     initRoomControls();
+    initChatCollapse();
+    initChatRichMedia();
+    initLightbox();
     initRealtimeSearch();
     initQuickSuggestions();
     loadPublicRooms();
 
-    // Direct room join via ?room=xxx
+    try {
+        await ensureSession();
+    } catch (e) {
+        console.error('Session bootstrap error:', e);
+    }
+
+    // Direct room join via ?room=xxx(&invite=yyy)
     const urlParams = new URLSearchParams(window.location.search);
     const roomParam = urlParams.get('room');
+    const inviteParam = urlParams.get('invite');
     if (roomParam) {
         const joinInput = document.getElementById('input-join-room-id');
         if (joinInput) joinInput.value = roomParam;
-        joinRoom(roomParam);
+        joinRoom(roomParam, inviteParam);
     }
 });
 
 // =============================================================================
-// LOBBY TABS & LIVE PROFILE PREVIEW
+// LOBBY TABS, PRIVATE ROOM CONTROLS & PASSCODE MODAL
 // =============================================================================
 function initLobbyTabs() {
     const tabCreate = document.getElementById('lobby-tab-create');
     const tabJoin = document.getElementById('lobby-tab-join');
     const paneCreate = document.getElementById('lobby-pane-create');
     const paneJoin = document.getElementById('lobby-pane-join');
+    const privateCb = document.getElementById('create-room-private');
+    const passWrap = document.getElementById('create-room-passcode-wrap');
+
+    if (privateCb && passWrap) {
+        privateCb.addEventListener('change', () => {
+            passWrap.classList.toggle('hidden', !privateCb.checked);
+            if (!privateCb.checked) {
+                const inp = document.getElementById('create-room-passcode');
+                if (inp) inp.value = '';
+            }
+        });
+    }
 
     if (tabCreate && tabJoin && paneCreate && paneJoin) {
         tabCreate.onclick = () => {
@@ -169,6 +229,72 @@ function initLobbyTabs() {
             paneJoin.classList.remove('hidden');
             paneCreate.classList.add('hidden');
             document.getElementById('input-join-room-id')?.focus();
+        };
+    }
+}
+
+function openPasscodeModal(roomId, hasPasscode = true) {
+    const modal = document.getElementById('passcode-modal');
+    const input = document.getElementById('passcode-modal-input');
+    const err = document.getElementById('passcode-modal-error');
+    const desc = document.getElementById('passcode-modal-desc');
+    if (!modal) return;
+
+    window.appState.pendingPrivateRoomId = roomId;
+    if (err) { err.textContent = ''; err.classList.add('hidden'); }
+    if (input) input.value = '';
+    if (desc) {
+        desc.textContent = hasPasscode
+            ? `Phòng #${roomId} là phòng riêng tư có mật khẩu. Vui lòng nhập mật khẩu để tham gia.`
+            : `Phòng #${roomId} là phòng riêng tư chỉ cho phép truy cập qua liên kết mời từ Chủ phòng.`;
+    }
+    if (input) input.classList.toggle('hidden', !hasPasscode);
+    modal.classList.remove('hidden');
+    if (hasPasscode && input) input.focus();
+}
+
+function closePasscodeModal() {
+    const modal = document.getElementById('passcode-modal');
+    if (modal) modal.classList.add('hidden');
+    window.appState.pendingPrivateRoomId = null;
+}
+
+function initPasscodeModal() {
+    document.getElementById('btn-close-passcode-modal')?.addEventListener('click', closePasscodeModal);
+    document.getElementById('btn-cancel-passcode-modal')?.addEventListener('click', closePasscodeModal);
+
+    const form = document.getElementById('passcode-modal-form');
+    if (form) {
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const roomId = window.appState.pendingPrivateRoomId;
+            const input = document.getElementById('passcode-modal-input');
+            const err = document.getElementById('passcode-modal-error');
+            if (!roomId || !input) return;
+
+            const passcode = input.value.trim();
+            if (!passcode) {
+                if (err) { err.textContent = 'Vui lòng nhập mật khẩu phòng'; err.classList.remove('hidden'); }
+                return;
+            }
+
+            try {
+                await ensureSession();
+                const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/access`, {
+                    method: 'POST',
+                    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+                    body: JSON.stringify({ passcode }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    if (err) { err.textContent = data.detail || 'Mật khẩu không đúng'; err.classList.remove('hidden'); }
+                    return;
+                }
+                closePasscodeModal();
+                joinRoom(roomId);
+            } catch (ex) {
+                if (err) { err.textContent = 'Lỗi xác thực quyền truy cập'; err.classList.remove('hidden'); }
+            }
         };
     }
 }
@@ -277,7 +403,7 @@ async function loadPublicRooms() {
             const playingTitle = r.current_track ? r.current_track.title : 'Đang chờ thêm nhạc...';
             const isPlaying = r.status === 'playing';
             const thumbHtml = r.current_track
-                ? `<img src="${r.current_track.thumbnail}" alt="" class="w-12 h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
+                ? `<img src="${safeThumbUrl(r.current_track.id)}" alt="" class="w-12 h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
                 : `<div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-pink-500/20 border border-indigo-500/20 flex items-center justify-center text-indigo-500 dark:text-indigo-300 flex-shrink-0">
                      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
                    </div>`;
@@ -300,7 +426,7 @@ async function loadPublicRooms() {
                 <div class="flex items-center gap-2.5 flex-shrink-0">
                     <span class="inline-flex items-center gap-1 text-xs font-semibold text-sub px-2.5 py-1 rounded-full surface-subtle">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                        ${r.user_count}
+                        ${parseInt(r.user_count, 10) || 0}
                     </span>
                     <span class="px-3.5 py-1.5 rounded-xl btn-gradient text-xs font-semibold">
                         Vào
@@ -317,25 +443,44 @@ async function loadPublicRooms() {
 }
 
 // =============================================================================
-// ROOM JOIN / CREATE FLOW
+// ROOM JOIN / CREATE FLOW (AUTHENTICATED + PRIVATE ROOM ACCESS)
 // =============================================================================
 async function handleCreateRoom(e) {
     if (e) e.preventDefault();
     const nameInput = document.getElementById('create-room-name');
     const djModeCheckbox = document.getElementById('create-room-dj-mode');
+    const privateCheckbox = document.getElementById('create-room-private');
+    const passcodeInput = document.getElementById('create-room-passcode');
 
     const name = nameInput.value.trim() || `Phòng của ${window.appState.userName}`;
     const djMode = djModeCheckbox ? djModeCheckbox.checked : false;
+    const isPrivate = privateCheckbox ? privateCheckbox.checked : false;
+    const passcode = (isPrivate && passcodeInput) ? passcodeInput.value.trim() : '';
+
+    if (passcode && passcode.length < 4) {
+        showToast('Mật khẩu phòng cần tối thiểu 4 ký tự', 'warning');
+        return;
+    }
 
     try {
+        await ensureSession();
         const res = await fetch('/api/rooms', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, dj_mode: djMode })
+            headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+                name,
+                dj_mode: djMode,
+                is_private: isPrivate,
+                passcode: passcode || null,
+            })
         });
         const data = await res.json();
+        if (!res.ok) {
+            showToast(data.detail || 'Không thể tạo phòng', 'error');
+            return;
+        }
         if (data.room_id) {
-            joinRoom(data.room_id);
+            joinRoom(data.room_id, data.invite_token || null);
         }
     } catch (err) {
         showToast('Lỗi khi tạo phòng: ' + err.message, 'error');
@@ -353,11 +498,41 @@ function handleJoinRoom(e) {
     joinRoom(id);
 }
 
-function joinRoom(roomId) {
+async function joinRoom(roomId, inviteToken = null) {
     const cleanId = roomId.trim().toLowerCase();
-    window.appState.roomId = cleanId;
+    try {
+        await ensureSession();
 
-    const newUrl = `${window.location.pathname}?room=${cleanId}`;
+        // Pre-check room existence & private room access before switching views
+        const query = inviteToken ? `?invite=${encodeURIComponent(inviteToken)}` : '';
+        const checkRes = await fetch(`/api/rooms/${encodeURIComponent(cleanId)}${query}`, {
+            headers: getAuthHeaders(),
+        });
+
+        if (checkRes.status === 404) {
+            showToast(`Không tìm thấy phòng #${cleanId}`, 'warning');
+            return;
+        }
+        if (checkRes.status === 403) {
+            const errData = await checkRes.json().catch(() => ({}));
+            openPasscodeModal(cleanId, !!errData.has_passcode);
+            return;
+        }
+        if (!checkRes.ok) {
+            showToast('Không thể tham gia phòng lúc này', 'error');
+            return;
+        }
+    } catch (err) {
+        showToast('Lỗi kết nối phiên bảo mật: ' + err.message, 'error');
+        return;
+    }
+
+    window.appState.roomId = cleanId;
+    window.appState.inviteToken = inviteToken;
+
+    const urlParams = new URLSearchParams({ room: cleanId });
+    if (inviteToken) urlParams.set('invite', inviteToken);
+    const newUrl = `${window.location.pathname}?${urlParams.toString()}`;
     window.history.pushState({ path: newUrl }, '', newUrl);
 
     document.getElementById('lobby-view').classList.add('hidden');
@@ -367,17 +542,24 @@ function joinRoom(roomId) {
     window.roomChat.init();
     window.roomChat.clear();
 
-    window.roomSocket.connect(cleanId, window.appState.userId, {
-        name: window.appState.userName,
-        avatar: window.appState.userAvatar,
-        color: window.appState.userColor
-    });
+    window.roomSocket.connect(
+        cleanId,
+        window.appState.sessionToken,
+        {
+            name: window.appState.userName,
+            avatar: window.appState.userAvatar,
+            color: window.appState.userColor,
+        },
+        inviteToken
+    );
 }
 
 function leaveRoom() {
     window.roomSocket.disconnect();
     window.appState.roomId = null;
+    window.appState.inviteToken = null;
     window.appState.roomData = null;
+    renderPriorityBanner(null);
 
     const ambientBg = document.getElementById('room-ambient-bg');
     if (ambientBg) ambientBg.classList.remove('active');
@@ -708,7 +890,7 @@ function renderSearchResultsList(results) {
         row.innerHTML = `
             <div class="flex items-center gap-3 min-w-0 flex-1">
                 <div class="relative w-16 h-10 rounded-lg overflow-hidden flex-shrink-0 bg-slate-900 shadow-sm">
-                    <img src="${item.thumbnail}" alt="" class="w-full h-full object-cover" loading="lazy">
+                    <img src="${safeThumbUrl(item.id)}" alt="" class="w-full h-full object-cover" loading="lazy">
                     ${item.duration_str ? `<span class="absolute bottom-0.5 right-0.5 px-1 py-0.2 rounded bg-black/80 text-white text-[10px] font-mono-num leading-tight">${escapeHtml(item.duration_str)}</span>` : ''}
                 </div>
                 <div class="min-w-0 flex-1">
@@ -774,6 +956,10 @@ function initSocketEvents() {
     socket.on('init_state', (data) => {
         window.appState.roomData = data.room;
         window.appState.isHost = data.is_host;
+        if (data.your_user_id) window.appState.userId = data.your_user_id;
+        if (data.room && data.room.invite_token) {
+            window.appState.inviteToken = data.room.invite_token;
+        }
         updateRoomUI(data.room);
 
         if (data.messages) {
@@ -791,11 +977,12 @@ function initSocketEvents() {
         window.appState.roomData.updated_at = data.updated_at;
         window.appState.roomData.queue = data.queue || [];
         if (data.history) window.appState.roomData.history = data.history;
-
-        // Reset skip vote button label
-        resetSkipVoteButton();
+        if ('priority_request' in data) {
+            window.appState.roomData.priority_request = data.priority_request;
+        }
 
         window.syncPlayer.syncWithRoomState(window.appState.roomData);
+        renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
         renderHistory();
 
@@ -814,6 +1001,19 @@ function initSocketEvents() {
     socket.on('queue_updated', (data) => {
         if (!window.appState.roomData) return;
         window.appState.roomData.queue = data.queue;
+        if ('priority_request' in data) {
+            window.appState.roomData.priority_request = data.priority_request;
+        }
+        renderPriorityBanner(window.appState.roomData.priority_request);
+        renderQueue();
+
+        if (data.message) window.roomChat.addMessage(data.message);
+    });
+
+    socket.on('priority_vote_updated', (data) => {
+        if (!window.appState.roomData) return;
+        window.appState.roomData.priority_request = data.priority_request || null;
+        renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
 
         if (data.message) window.roomChat.addMessage(data.message);
@@ -832,9 +1032,12 @@ function initSocketEvents() {
             window.appState.roomData.users = data.users;
             window.appState.roomData.host_id = data.host_id;
             window.appState.isHost = (data.host_id === window.appState.userId);
+            if ('priority_request' in data) {
+                window.appState.roomData.priority_request = data.priority_request;
+                renderPriorityBanner(window.appState.roomData.priority_request);
+            }
             renderMembers();
             updateHostControls();
-            resetSkipVoteButton();
         }
         if (data.message) window.roomChat.addMessage(data.message);
     });
@@ -844,23 +1047,14 @@ function initSocketEvents() {
             window.appState.roomData.users = data.users;
             window.appState.roomData.host_id = data.host_id;
             window.appState.isHost = (data.host_id === window.appState.userId);
+            if ('priority_request' in data) {
+                window.appState.roomData.priority_request = data.priority_request;
+                renderPriorityBanner(window.appState.roomData.priority_request);
+            }
             renderMembers();
             updateHostControls();
-            resetSkipVoteButton();
         }
         if (data.message) window.roomChat.addMessage(data.message);
-    });
-
-    socket.on('skip_vote_updated', (data) => {
-        const skipBtn = document.getElementById('btn-vote-skip');
-        if (skipBtn) {
-            const isVoted = data.voted_users.includes(window.appState.userId);
-            const label = skipBtn.querySelector('.js-skip-label');
-            if (label) label.textContent = `Bỏ qua (${data.count}/${data.needed})`;
-            skipBtn.classList.toggle('border-amber-500', isVoted);
-            skipBtn.classList.toggle('text-amber-600', isVoted);
-            skipBtn.classList.toggle('dark:text-amber-400', isVoted);
-        }
     });
 
     socket.on('dj_mode_changed', (data) => {
@@ -874,16 +1068,45 @@ function initSocketEvents() {
     socket.on('error', (err) => {
         if (err.message) showToast(err.message, 'warning');
     });
-}
 
-function resetSkipVoteButton() {
-    const skipBtn = document.getElementById('btn-vote-skip');
-    if (!skipBtn) return;
-    const usersCount = window.appState.roomData?.users?.length || 1;
-    const needed = Math.max(1, Math.floor((usersCount + 1) / 2));
-    const label = skipBtn.querySelector('.js-skip-label');
-    if (label) label.textContent = `Bỏ qua (0/${needed})`;
-    skipBtn.classList.remove('border-amber-500', 'text-amber-600', 'dark:text-amber-400');
+    socket.on('access_denied', (data) => {
+        const failedRoom = window.appState.roomId;
+        leaveRoom();
+        showToast(data?.reason || 'Không có quyền truy cập phòng riêng tư', 'error');
+        if (failedRoom) openPasscodeModal(failedRoom, true);
+    });
+
+    socket.on('room_not_found', (data) => {
+        leaveRoom();
+        showToast(data?.reason || 'Phòng không tồn tại', 'warning');
+    });
+
+    socket.on('rate_limited', (data) => {
+        leaveRoom();
+        showToast(data?.reason || 'Quá nhiều kết nối đồng thời từ địa chỉ IP của bạn', 'warning');
+    });
+
+    socket.on('session_expired', async () => {
+        if (!window.appState.roomId) return;
+        try {
+            const roomId = window.appState.roomId;
+            const invite = window.appState.inviteToken;
+            await ensureSession(true);
+            window.roomSocket.connect(
+                roomId,
+                window.appState.sessionToken,
+                {
+                    name: window.appState.userName,
+                    avatar: window.appState.userAvatar,
+                    color: window.appState.userColor,
+                },
+                invite
+            );
+        } catch (e) {
+            leaveRoom();
+            showToast('Phiên làm việc đã hết hạn, vui lòng vào lại phòng', 'warning');
+        }
+    });
 }
 
 // =============================================================================
@@ -893,14 +1116,92 @@ function updateRoomUI(room) {
     if (!room) return;
     const titleEl = document.getElementById('room-title-display');
     const idBadge = document.getElementById('room-id-badge');
+    const privBadge = document.getElementById('room-private-badge');
     if (titleEl) titleEl.textContent = room.name;
     if (idBadge) idBadge.textContent = `#${room.id}`;
+    if (privBadge) privBadge.classList.toggle('hidden', !room.is_private);
 
     updateHostControls();
-    resetSkipVoteButton();
+    renderPriorityBanner(room.priority_request || null);
     renderQueue();
     renderHistory();
     renderMembers();
+}
+
+let priorityBannerTimer = null;
+
+function renderPriorityBanner(priorityReq) {
+    const banner = document.getElementById('priority-vote-banner');
+    if (!banner) return;
+
+    if (priorityBannerTimer) {
+        clearInterval(priorityBannerTimer);
+        priorityBannerTimer = null;
+    }
+
+    if (!priorityReq || !priorityReq.track_uid) {
+        banner.classList.add('hidden');
+        return;
+    }
+
+    const thumbEl = document.getElementById('priority-banner-thumb');
+    const titleEl = document.getElementById('priority-banner-title');
+    const reqEl = document.getElementById('priority-banner-requester');
+    const progressEl = document.getElementById('priority-banner-progress');
+    const countEl = document.getElementById('priority-banner-count');
+    const countdownEl = document.getElementById('priority-banner-countdown');
+    const voteBtn = document.getElementById('btn-vote-priority');
+    const cancelBtn = document.getElementById('btn-cancel-priority');
+
+    if (thumbEl) thumbEl.src = safeThumbUrl(priorityReq.track_id);
+    if (titleEl) titleEl.textContent = priorityReq.track_title || '';
+    if (reqEl) reqEl.textContent = `Đề xuất bởi ${priorityReq.requested_by_name || 'Thành viên'}`;
+
+    const count = Number(priorityReq.count || 0);
+    const needed = Math.max(1, Number(priorityReq.needed || 1));
+    const pct = Math.min(100, Math.round((count / needed) * 100));
+
+    if (progressEl) progressEl.style.width = `${pct}%`;
+    if (countEl) countEl.textContent = `${count}/${needed} phiếu`;
+
+    const myUid = window.appState.userId;
+    const voted = Array.isArray(priorityReq.voted_users) && priorityReq.voted_users.includes(myUid);
+
+    if (voteBtn) {
+        if (voted) {
+            voteBtn.className = 'px-3.5 py-1.5 rounded-xl bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/40 text-xs font-extrabold transition flex items-center gap-1.5';
+            voteBtn.innerHTML = '<span>✓ Đã đồng ý</span>';
+            voteBtn.title = 'Bấm lại để rút phiếu';
+        } else {
+            voteBtn.className = 'px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-extrabold transition shadow-sm flex items-center gap-1.5';
+            voteBtn.innerHTML = '<span>⚡ Đồng ý ưu tiên</span>';
+            voteBtn.title = 'Bình chọn đưa bài này lên phát kế tiếp (#1)';
+        }
+    }
+
+    if (cancelBtn) {
+        const canCancel = window.appState.isHost || priorityReq.requested_by_id === myUid;
+        cancelBtn.classList.toggle('hidden', !canCancel);
+    }
+
+    const updateCountdown = () => {
+        if (!countdownEl || !priorityReq.expires_at) return;
+        const left = Math.max(0, Math.ceil(priorityReq.expires_at - Date.now() / 1000));
+        countdownEl.textContent = `${left}s`;
+        if (left <= 0) {
+            clearInterval(priorityBannerTimer);
+            priorityBannerTimer = null;
+            banner.classList.add('hidden');
+            if (window.appState.roomData) {
+                window.appState.roomData.priority_request = null;
+                renderQueue();
+            }
+        }
+    };
+    updateCountdown();
+    priorityBannerTimer = setInterval(updateCountdown, 1000);
+
+    banner.classList.remove('hidden');
 }
 
 function updateHostControls() {
@@ -915,9 +1216,6 @@ function updateHostControls() {
             hostBadge.innerHTML = `<span class="inline-flex items-center px-2 py-0.5 rounded-full surface-subtle text-sub text-[11px] font-medium">Thành viên</span>`;
         }
     }
-
-    const forceSkipBtn = document.getElementById('btn-force-skip');
-    if (forceSkipBtn) forceSkipBtn.classList.toggle('hidden', !isHost);
 
     const djToggleBtn = document.getElementById('btn-dj-mode-toggle');
     if (djToggleBtn) {
@@ -971,13 +1269,33 @@ function renderQueue() {
 
     const isHost = window.appState.isHost;
     const currentUid = window.appState.userId;
+    const activePriority = window.appState.roomData && window.appState.roomData.priority_request;
 
     queue.forEach((track, index) => {
         const canDelete = isHost || (track.added_by_id === currentUid);
         const canPromote = isHost && index > 0;
+        const canRequestPriority = index > 0;
+        const isPriorityTarget = !!(activePriority && activePriority.track_uid === track.uid);
+        const hasVotedPriority = isPriorityTarget && Array.isArray(activePriority.voted_users) && activePriority.voted_users.includes(currentUid);
 
         const item = document.createElement('div');
-        item.className = 'surface-subtle flex items-center justify-between gap-3 p-2.5 rounded-2xl group';
+        item.className = `surface-subtle flex items-center justify-between gap-3 p-2.5 rounded-2xl group ${
+            isPriorityTarget ? 'ring-1 ring-amber-500/50 bg-amber-500/5' : ''
+        }`;
+
+        const priorityBtnHtml = canRequestPriority
+            ? (isPriorityTarget
+                ? `<button type="button" class="btn-priority-track px-2.5 py-1 rounded-lg text-[11px] font-bold transition flex items-center gap-1 ${
+                    hasVotedPriority
+                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/35'
+                        : 'bg-amber-500 text-slate-950 hover:bg-amber-600 shadow-sm'
+                }" title="Bình chọn ưu tiên bài này lên #1">
+                    <span>⚡ ${activePriority.count}/${activePriority.needed}</span>
+                </button>`
+                : `<button type="button" class="btn-priority-track px-2 py-1 rounded-lg text-[11px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 transition flex items-center gap-1" title="Yêu cầu ưu tiên phát bài này kế tiếp (cần ≥50% thành viên vote)">
+                    <span>⚡</span><span class="hidden sm:inline">Ưu tiên</span>
+                </button>`)
+            : `<span class="px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold" title="Sẽ phát kế tiếp">#1 Kế tiếp</span>`;
 
         item.innerHTML = `
             <div class="flex items-center gap-3 min-w-0 flex-1">
@@ -985,7 +1303,7 @@ function renderQueue() {
                     ${String(index + 1).padStart(2, '0')}
                 </span>
                 <div class="relative w-14 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-slate-900 shadow-sm">
-                    <img src="${track.thumbnail}" alt="" class="w-full h-full object-cover" loading="lazy">
+                    <img src="${safeThumbUrl(track.id)}" alt="" class="w-full h-full object-cover" loading="lazy">
                     ${track.duration_str ? `<span class="absolute bottom-0.5 right-0.5 px-1 rounded bg-black/75 text-white text-[9px] font-mono-num">${escapeHtml(track.duration_str)}</span>` : ''}
                 </div>
                 <div class="min-w-0 flex-1">
@@ -997,19 +1315,32 @@ function renderQueue() {
                     </div>
                 </div>
             </div>
-            <div class="flex items-center gap-1 flex-shrink-0 opacity-75 group-hover:opacity-100 transition">
+            <div class="flex items-center gap-1 flex-shrink-0 opacity-85 group-hover:opacity-100 transition">
+                ${priorityBtnHtml}
                 ${canPromote ? `
-                    <button class="btn-promote-track p-1.5 rounded-lg text-sub hover:text-indigo-500 hover:bg-indigo-500/10 transition" title="Đưa lên phát kế tiếp">
+                    <button type="button" class="btn-promote-track p-1.5 rounded-lg text-sub hover:text-indigo-500 hover:bg-indigo-500/10 transition" title="Host đưa ngay lên phát kế tiếp">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
                     </button>
                 ` : ''}
                 ${canDelete ? `
-                    <button class="btn-delete-track p-1.5 rounded-lg text-sub hover:text-rose-500 hover:bg-rose-500/10 transition" title="Xóa khỏi hàng đợi">
+                    <button type="button" class="btn-delete-track p-1.5 rounded-lg text-sub hover:text-rose-500 hover:bg-rose-500/10 transition" title="Xóa khỏi hàng đợi">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                     </button>
                 ` : ''}
             </div>
         `;
+
+        const priorityBtn = item.querySelector('.btn-priority-track');
+        if (priorityBtn) {
+            priorityBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (isPriorityTarget) {
+                    window.roomSocket.votePriority(track.uid);
+                } else {
+                    window.roomSocket.requestPriority(track.uid);
+                }
+            };
+        }
 
         const promoteBtn = item.querySelector('.btn-promote-track');
         if (promoteBtn) {
@@ -1051,7 +1382,7 @@ function renderHistory() {
 
         item.innerHTML = `
             <div class="flex items-center gap-3 min-w-0 flex-1">
-                <img src="${track.thumbnail}" alt="" class="w-12 h-8 object-cover rounded-lg flex-shrink-0 shadow-sm">
+                <img src="${safeThumbUrl(track.id)}" alt="" class="w-12 h-8 object-cover rounded-lg flex-shrink-0 shadow-sm">
                 <div class="min-w-0 flex-1">
                     <h5 class="text-xs font-semibold text-main truncate">${escapeHtml(track.title)}</h5>
                     <p class="text-[11px] text-sub truncate">${escapeHtml(track.author)}</p>
@@ -1092,11 +1423,13 @@ function renderMembers() {
         const item = document.createElement('div');
         item.className = 'surface-subtle flex items-center justify-between p-2.5 rounded-2xl';
 
+        const uColor = safeColor(u.color);
+        const uAvatar = escapeHtml(u.avatar || '🎧');
         item.innerHTML = `
             <div class="flex items-center gap-2.5 min-w-0">
                 <div class="w-9 h-9 rounded-full flex items-center justify-center text-base shadow-sm flex-shrink-0"
-                     style="background-color: ${u.color || '#6366f1'}22; border: 1.5px solid ${u.color || '#6366f1'}88">
-                    ${u.avatar || '🎧'}
+                     style="background-color: ${uColor}22; border: 1.5px solid ${uColor}88">
+                    ${uAvatar}
                 </div>
                 <div class="min-w-0">
                     <div class="flex items-center gap-1.5">
@@ -1118,8 +1451,6 @@ function renderMembers() {
 function initPlayerListeners() {
     const playPauseBtn = document.getElementById('btn-play-pause');
     const progressBar = document.getElementById('player-progress-bar');
-    const voteSkipBtn = document.getElementById('btn-vote-skip');
-    const forceSkipBtn = document.getElementById('btn-force-skip');
     const volumeSlider = document.getElementById('player-volume-slider');
     const muteBtn = document.getElementById('btn-toggle-mute');
     const btnModeVideo = document.getElementById('btn-mode-video');
@@ -1149,9 +1480,6 @@ function initPlayerListeners() {
             }
         });
     }
-
-    if (voteSkipBtn) voteSkipBtn.onclick = () => window.roomSocket.voteSkip(false);
-    if (forceSkipBtn) forceSkipBtn.onclick = () => window.roomSocket.voteSkip(true);
 
     if (volumeSlider) {
         volumeSlider.value = window.syncPlayer.volume;
@@ -1202,9 +1530,18 @@ function initPlayerListeners() {
 }
 
 function copyInviteLink() {
-    const url = window.location.href;
+    const params = new URLSearchParams({ room: window.appState.roomId || '' });
+    if (window.appState.inviteToken) {
+        params.set('invite', window.appState.inviteToken);
+    }
+    const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
     navigator.clipboard.writeText(url).then(() => {
-        showToast('Đã sao chép link mời phòng!', 'success');
+        showToast(
+            window.appState.inviteToken
+                ? 'Đã sao chép link mời riêng tư (kèm khóa truy cập)!'
+                : 'Đã sao chép link mời phòng!',
+            'success'
+        );
     }).catch(() => {
         showToast(`Link phòng: ${url}`, 'info');
     });
@@ -1236,6 +1573,18 @@ function initRoomControls() {
 
     document.getElementById('btn-dj-mode-toggle')?.addEventListener('click', () => {
         window.roomSocket.toggleDjMode();
+    });
+
+    // Priority Vote Banner Actions
+    document.getElementById('btn-vote-priority')?.addEventListener('click', () => {
+        const req = window.appState.roomData && window.appState.roomData.priority_request;
+        if (req && req.track_uid) {
+            window.roomSocket.votePriority(req.track_uid);
+        }
+    });
+
+    document.getElementById('btn-cancel-priority')?.addEventListener('click', () => {
+        window.roomSocket.cancelPriority();
     });
 
     // Queue vs History Tabs
@@ -1280,13 +1629,42 @@ function initRoomControls() {
         };
     }
 
-    // Chat Form Submit
+    // Chat Form Submit (Text + Optional Pending Uploaded Image)
     const chatForm = document.getElementById('chat-input-form');
     const chatInput = document.getElementById('chat-text-input');
     if (chatForm && chatInput) {
-        chatForm.onsubmit = (e) => {
+        chatForm.onsubmit = async (e) => {
             e.preventDefault();
             const text = chatInput.value.trim();
+            const pendingFile = window.appState.pendingImageFile;
+
+            if (pendingFile) {
+                const sendBtn = document.getElementById('btn-chat-send');
+                if (sendBtn) sendBtn.disabled = true;
+                try {
+                    const uploadBlob = await compressImageIfNeeded(pendingFile);
+                    await ensureSession();
+                    const res = await fetch('/api/chat/upload', {
+                        method: 'POST',
+                        headers: getAuthHeaders({ 'Content-Type': uploadBlob.type || 'application/octet-stream' }),
+                        body: uploadBlob,
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        showToast(data.detail || 'Không thể tải hình ảnh lên', 'error');
+                        return;
+                    }
+                    window.roomSocket.sendImage(data.media_id, text);
+                    chatInput.value = '';
+                    clearPendingChatImage();
+                } catch (err) {
+                    showToast('Lỗi khi gửi hình ảnh: ' + err.message, 'error');
+                } finally {
+                    if (sendBtn) sendBtn.disabled = false;
+                }
+                return;
+            }
+
             if (text) {
                 window.roomSocket.sendChat(text);
                 chatInput.value = '';
@@ -1307,14 +1685,417 @@ function initRoomControls() {
 }
 
 // =============================================================================
-// QUICK SUGGESTIONS STRIP
+// COLLAPSIBLE / MINIMIZABLE CHAT SIDEBAR
 // =============================================================================
+function setChatCollapsed(collapsed) {
+    window.appState.isChatCollapsed = !!collapsed;
+    localStorage.setItem('floor2_chat_collapsed', collapsed ? 'true' : 'false');
+
+    const sidebar = document.getElementById('chat-sidebar');
+    const fab = document.getElementById('btn-expand-chat-fab');
+    const headerBtn = document.getElementById('btn-header-chat-toggle');
+
+    if (sidebar) sidebar.classList.toggle('hidden', !!collapsed);
+    if (fab) fab.classList.toggle('hidden', !collapsed);
+
+    if (headerBtn) {
+        headerBtn.classList.toggle('border-indigo-500/50', !collapsed);
+        headerBtn.classList.toggle('bg-indigo-500/10', !collapsed);
+        const lbl = headerBtn.querySelector('.js-header-chat-label');
+        if (lbl) lbl.textContent = collapsed ? 'Mở Chat' : 'Chat';
+    }
+
+    if (!collapsed && window.roomChat) {
+        window.roomChat.resetUnread();
+        window.roomChat.scrollToBottom();
+    }
+}
+
+function initChatCollapse() {
+    document.getElementById('btn-minimize-chat')?.addEventListener('click', () => setChatCollapsed(true));
+    document.getElementById('btn-expand-chat-fab')?.addEventListener('click', () => setChatCollapsed(false));
+    document.getElementById('btn-header-chat-toggle')?.addEventListener('click', () => {
+        setChatCollapsed(!window.appState.isChatCollapsed);
+    });
+    setChatCollapsed(window.appState.isChatCollapsed);
+}
+
+// =============================================================================
+// RICH CHAT MEDIA: EMOJI PICKER, LIVE GIF SEARCH & IMAGE UPLOAD / PASTE
+// =============================================================================
+const EMOJI_CATEGORIES = [
+    {
+        icon: '🎵',
+        label: 'Nhạc & Quẩy',
+        items: ['🎵', '🎶', '🎧', '🎤', '🎸', '🎹', '🥁', '🎷', '🔥', '✨', '💃', '🕺', '🎉', '🎊', '🥳', '🚀', '⚡', '🌟', '💥', '🔊', '📻', '💿', '🏆', '👑'],
+    },
+    {
+        icon: '😀',
+        label: 'Cảm xúc',
+        items: ['😀', '😄', '😁', '😂', '🤣', '🥹', '😍', '🥰', '😘', '😎', '🤩', '😇', '🤔', '😮', '😱', '😢', '😭', '😤', '😴', '🤯', '🫠', '🫡', '🤭', '😏'],
+    },
+    {
+        icon: '💖',
+        label: 'Tương tác',
+        items: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '💖', '💘', '💯', '👍', '👎', '👏', '🙌', '🤝', '🙏', '✌️', '🤘', '🫶', '👌', '💪', '👀', '💬'],
+    },
+    {
+        icon: '☕',
+        label: 'Chill & Đồ ăn',
+        items: ['☕', '🧋', '🍵', '🍻', '🥂', '🍷', '🍹', '🍕', '🍔', '🍟', '🍜', '🍣', '🍰', '🍉', '🍓', '🌙', '⭐', '🌈', '🌸', '🐱', '🐶', '🦊', '🐼', '🦋'],
+    },
+];
+
+let pendingPreviewObjectUrl = null;
+let gifSearchTimer = null;
+let gifAbortController = null;
+
+function clearPendingChatImage() {
+    window.appState.pendingImageFile = null;
+    if (pendingPreviewObjectUrl) {
+        URL.revokeObjectURL(pendingPreviewObjectUrl);
+        pendingPreviewObjectUrl = null;
+    }
+    const bar = document.getElementById('chat-image-preview-bar');
+    const thumb = document.getElementById('chat-image-preview-thumb');
+    const fileInput = document.getElementById('chat-image-file-input');
+    if (bar) bar.classList.add('hidden');
+    if (thumb) thumb.src = '';
+    if (fileInput) fileInput.value = '';
+}
+
+function stageChatImageFile(file) {
+    if (!file) return;
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+    if (!allowedTypes.includes(file.type)) {
+        showToast('Chỉ hỗ trợ ảnh PNG, JPG, GIF hoặc WebP', 'warning');
+        return;
+    }
+    if (file.type === 'image/gif' && file.size > 2_500_000) {
+        showToast('Ảnh GIF tải lên tối đa 2.5 MB', 'warning');
+        return;
+    }
+    if (file.size > 12_000_000) {
+        showToast('Ảnh gốc quá lớn (vui lòng chọn ảnh dưới 12 MB)', 'warning');
+        return;
+    }
+
+    clearPendingChatImage();
+    window.appState.pendingImageFile = file;
+    pendingPreviewObjectUrl = URL.createObjectURL(file);
+
+    const bar = document.getElementById('chat-image-preview-bar');
+    const thumb = document.getElementById('chat-image-preview-thumb');
+    const nameEl = document.getElementById('chat-image-preview-name');
+    if (thumb) thumb.src = pendingPreviewObjectUrl;
+    if (nameEl) nameEl.textContent = file.name || 'Ảnh đã dán từ clipboard';
+    if (bar) bar.classList.remove('hidden');
+
+    document.getElementById('chat-text-input')?.focus();
+}
+
+async function compressImageIfNeeded(file) {
+    // Keep animated GIFs and small files untouched
+    if (file.type === 'image/gif' || file.size <= 350_000) {
+        return file;
+    }
+    return new Promise((resolve) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            const maxDim = 1080;
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+                const ratio = Math.min(maxDim / width, maxDim / height);
+                width = Math.round(width * ratio);
+                height = Math.round(height * ratio);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            canvas.toBlob(
+                (blob) => resolve(blob || file),
+                'image/webp',
+                0.84
+            );
+        };
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            resolve(file);
+        };
+        img.src = url;
+    });
+}
+
+function initChatRichMedia() {
+    const emojiPopover = document.getElementById('emoji-picker-popover');
+    const gifPopover = document.getElementById('gif-picker-popover');
+    const emojiBtn = document.getElementById('btn-toggle-emoji-picker');
+    const gifBtn = document.getElementById('btn-toggle-gif-picker');
+    const uploadBtn = document.getElementById('btn-chat-upload-image');
+    const fileInput = document.getElementById('chat-image-file-input');
+    const chatInput = document.getElementById('chat-text-input');
+
+    const closeAllPopovers = () => {
+        emojiPopover?.classList.add('hidden');
+        gifPopover?.classList.add('hidden');
+    };
+
+    // 1. EMOJI / ICON PICKER
+    const catTabs = document.getElementById('emoji-category-tabs');
+    const emojiGrid = document.getElementById('emoji-picker-grid');
+    let activeEmojiCat = 0;
+
+    const renderEmojiCategory = (catIdx) => {
+        activeEmojiCat = catIdx;
+        if (catTabs) {
+            catTabs.innerHTML = '';
+            EMOJI_CATEGORIES.forEach((cat, idx) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = `px-2 py-1 rounded-lg text-sm transition ${idx === activeEmojiCat ? 'bg-indigo-500/20 ring-1 ring-indigo-500/40' : 'hover:bg-slate-500/10'}`;
+                b.textContent = cat.icon;
+                b.title = cat.label;
+                b.onclick = () => renderEmojiCategory(idx);
+                catTabs.appendChild(b);
+            });
+        }
+        if (emojiGrid) {
+            emojiGrid.innerHTML = '';
+            EMOJI_CATEGORIES[catIdx].items.forEach(em => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'h-8 rounded-lg hover:bg-indigo-500/15 active:scale-90 transition text-lg flex items-center justify-center';
+                b.textContent = em;
+                b.onclick = () => {
+                    if (chatInput) {
+                        const start = chatInput.selectionStart ?? chatInput.value.length;
+                        const end = chatInput.selectionEnd ?? chatInput.value.length;
+                        chatInput.value = chatInput.value.slice(0, start) + em + chatInput.value.slice(end);
+                        const nextPos = start + em.length;
+                        chatInput.setSelectionRange(nextPos, nextPos);
+                        chatInput.focus();
+                    }
+                };
+                emojiGrid.appendChild(b);
+            });
+        }
+    };
+    renderEmojiCategory(0);
+
+    emojiBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = emojiPopover?.classList.contains('hidden');
+        closeAllPopovers();
+        if (willOpen) emojiPopover?.classList.remove('hidden');
+    });
+    document.getElementById('btn-close-emoji-picker')?.addEventListener('click', closeAllPopovers);
+
+    // 2. GIF PICKER (Curated + Live Search with Client-Side LRU+TTL Cache)
+    const gifInput = document.getElementById('gif-search-input');
+    const gifGrid = document.getElementById('gif-results-grid');
+    const gifSpinner = document.getElementById('gif-search-spinner');
+    const gifCache = new Map(); // query -> { ts, gifs }
+    const GIF_CACHE_TTL_MS = 10 * 60 * 1000;
+    let gifsLoadedOnce = false;
+
+    const renderGifItems = (gifs) => {
+        if (!gifGrid) return;
+        gifGrid.innerHTML = '';
+        if (!gifs || gifs.length === 0) {
+            gifGrid.innerHTML = `<div class="col-span-2 text-center py-6 text-xs text-dim">Không tìm thấy GIF phù hợp</div>`;
+            return;
+        }
+        gifs.forEach(gif => {
+            if (!/^[A-Za-z0-9]{8,28}$/.test(gif.id || '')) return;
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'relative h-24 rounded-xl overflow-hidden bg-slate-900/50 border border-theme hover:border-indigo-500 transition group';
+            card.innerHTML = `<img src="https://media.giphy.com/media/${gif.id}/200w.gif" alt="GIF" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200">`;
+            card.onclick = () => {
+                window.roomSocket.sendGif(gif.id);
+                closeAllPopovers();
+            };
+            gifGrid.appendChild(card);
+        });
+    };
+
+    const loadGifs = async (query = '') => {
+        if (!gifGrid) return;
+        const cacheKey = (query || '').trim().toLowerCase();
+        const cached = gifCache.get(cacheKey);
+        if (cached && (Date.now() - cached.ts) < GIF_CACHE_TTL_MS) {
+            if (gifAbortController) gifAbortController.abort();
+            gifSpinner?.classList.add('hidden');
+            gifsLoadedOnce = true;
+            renderGifItems(cached.gifs);
+            return;
+        }
+
+        if (gifAbortController) gifAbortController.abort();
+        const controller = new AbortController();
+        gifAbortController = controller;
+
+        gifSpinner?.classList.remove('hidden');
+        if (!gifsLoadedOnce || gifGrid.children.length === 0) {
+            gifGrid.innerHTML = Array.from({ length: 6 }).map(() => `<div class="h-24 rounded-xl skeleton-box"></div>`).join('');
+        }
+
+        try {
+            const res = await fetch(`/api/gifs/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+            const data = await res.json();
+            if (controller.signal.aborted) return;
+
+            gifsLoadedOnce = true;
+            const gifs = data.gifs || [];
+            if (gifs.length > 0) {
+                if (gifCache.size >= 50) {
+                    const oldestKey = gifCache.keys().next().value;
+                    gifCache.delete(oldestKey);
+                }
+                gifCache.set(cacheKey, { ts: Date.now(), gifs });
+            }
+            renderGifItems(gifs);
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+        } finally {
+            if (gifAbortController === controller) {
+                gifSpinner?.classList.add('hidden');
+            }
+        }
+    };
+
+    gifBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = gifPopover?.classList.contains('hidden');
+        closeAllPopovers();
+        if (willOpen) {
+            gifPopover?.classList.remove('hidden');
+            if (!gifsLoadedOnce) loadGifs('');
+            gifInput?.focus();
+        }
+    });
+    document.getElementById('btn-close-gif-picker')?.addEventListener('click', closeAllPopovers);
+
+    gifInput?.addEventListener('input', () => {
+        if (gifSearchTimer) clearTimeout(gifSearchTimer);
+        gifSearchTimer = setTimeout(() => {
+            loadGifs(gifInput.value.trim());
+        }, 260);
+    });
+
+    document.querySelectorAll('.js-gif-tag').forEach(tag => {
+        tag.addEventListener('click', () => {
+            const q = tag.getAttribute('data-q') || '';
+            if (gifInput) gifInput.value = q;
+            loadGifs(q);
+        });
+    });
+
+    // 3. IMAGE UPLOAD + CLIPBOARD PASTE (Ctrl+V)
+    uploadBtn?.addEventListener('click', () => {
+        closeAllPopovers();
+        fileInput?.click();
+    });
+
+    fileInput?.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (file) stageChatImageFile(file);
+    });
+
+    document.getElementById('btn-cancel-chat-image')?.addEventListener('click', clearPendingChatImage);
+
+    chatInput?.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+            if (item.type && item.type.startsWith('image/')) {
+                const file = item.getAsFile();
+                if (file) {
+                    e.preventDefault();
+                    stageChatImageFile(file);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Close popovers on outside click
+    document.addEventListener('click', (e) => {
+        if (
+            emojiPopover && !emojiPopover.classList.contains('hidden') &&
+            !emojiPopover.contains(e.target) && e.target !== emojiBtn
+        ) {
+            emojiPopover.classList.add('hidden');
+        }
+        if (
+            gifPopover && !gifPopover.classList.contains('hidden') &&
+            !gifPopover.contains(e.target) && e.target !== gifBtn
+        ) {
+            gifPopover.classList.add('hidden');
+        }
+    });
+}
+
+// =============================================================================
+// IMAGE / GIF LIGHTBOX MODAL
+// =============================================================================
+window.openImageLightbox = function (url, senderName) {
+    const modal = document.getElementById('image-lightbox-modal');
+    const img = document.getElementById('lightbox-img');
+    const cap = document.getElementById('lightbox-caption');
+    if (!modal || !img) return;
+    img.src = url;
+    if (cap) cap.textContent = senderName ? `Gửi bởi ${senderName}` : '';
+    modal.classList.remove('hidden');
+};
+
+function initLightbox() {
+    const modal = document.getElementById('image-lightbox-modal');
+    const close = () => modal?.classList.add('hidden');
+    document.getElementById('btn-close-lightbox')?.addEventListener('click', close);
+    modal?.addEventListener('click', (e) => {
+        if (e.target === modal) close();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+            close();
+        }
+    });
+}
+
+// =============================================================================
+// QUICK SUGGESTIONS STRIP (WITH SESSION STORAGE CACHE)
+// =============================================================================
+const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v1';
+const SUGGESTIONS_CACHE_TTL_MS = 5 * 60 * 1000;
+
 async function initQuickSuggestions() {
     const container = document.getElementById('quick-suggestions-chips');
     try {
-        const res = await fetch('/api/suggestions');
-        const data = await res.json();
-        const suggestions = data.suggestions || [];
+        let suggestions = null;
+        try {
+            const raw = sessionStorage.getItem(SUGGESTIONS_CACHE_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && Array.isArray(parsed.items) && (Date.now() - parsed.ts) < SUGGESTIONS_CACHE_TTL_MS) {
+                    suggestions = parsed.items;
+                }
+            }
+        } catch (_) {}
+
+        if (!suggestions) {
+            const res = await fetch('/api/suggestions');
+            const data = await res.json();
+            suggestions = data.suggestions || [];
+            try {
+                sessionStorage.setItem(SUGGESTIONS_CACHE_KEY, JSON.stringify({ ts: Date.now(), items: suggestions }));
+            } catch (_) {}
+        }
+
         window.appState.suggestions = suggestions;
 
         if (!container) return;
@@ -1325,7 +2106,7 @@ async function initQuickSuggestions() {
             chip.type = 'button';
             chip.className = 'surface-subtle flex items-center gap-2.5 pl-1.5 pr-3 py-1.5 rounded-full text-left flex-shrink-0 group hover:border-indigo-500/40';
             chip.innerHTML = `
-                <img src="${song.thumbnail}" alt="" class="w-7 h-7 rounded-full object-cover shadow-sm flex-shrink-0">
+                <img src="${safeThumbUrl(song.id)}" alt="" class="w-7 h-7 rounded-full object-cover shadow-sm flex-shrink-0">
                 <div class="min-w-0 max-w-[160px]">
                     <div class="text-xs font-semibold text-main truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(song.title)}</div>
                 </div>

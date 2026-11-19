@@ -8,12 +8,32 @@ services:
     region: singapore
     branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --limit-concurrency 200 --timeout-keep-alive 5
     healthCheckPath: /api/health
     autoDeployTrigger: checksPass
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # Keep-alive tự động đánh thức server (mỗi 8 phút) & giữ thức các service Render khác
+      - key: KEEP_ALIVE_ENABLED
+        value: "true"
+      - key: APP_SERVER_PUBLIC_URL
+        value: https://play-music-floor-2.onrender.com
+      - key: KEEP_ALIVE_EXTRA_URLS
+        sync: false
+      # Chống tấn công DDoS tầng ứng dụng (L7)
+      - key: DDOS_GUARD_ENABLED
+        value: "true"
+      # Cách 1 (Khuyên dùng): Chuỗi kết nối Postgres Pooler từ Supabase (tự động tạo bảng)
+      - key: DATABASE_URL
+        sync: false
+      # Cách 2 (Tuỳ chọn): Dùng Supabase REST API (cần chạy supabase_schema.sql 1 lần)
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
       # Tuỳ chọn: proxy dân dụng nếu YouTube chặn IP datacenter cho luồng audio fallback
       - key: YT_PROXY
         sync: false

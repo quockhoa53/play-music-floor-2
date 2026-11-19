@@ -8,6 +8,8 @@ from typing import Optional, List, Dict, Any, Tuple
 import httpx
 import yt_dlp
 
+from services.cache import TTLCache
+
 YDL_OPTS = {
     "extract_flat": True,
     "skip_download": True,
@@ -46,17 +48,21 @@ WEB_HEADERS = {
 # Persistent HTTP client for connection pooling (eliminates repeated TLS handshakes)
 _http_client: Optional[httpx.AsyncClient] = None
 
-# TTL cache: query_lower::limit -> (timestamp, results)
-_search_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
-CACHE_TTL_SEC = 600
-CACHE_MAX_SIZE = 250
+# Unified LRU + TTL caches
+yt_search_cache: TTLCache[List[Dict[str, Any]]] = TTLCache("yt_search", max_size=300, default_ttl=900)
+yt_info_cache: TTLCache[Dict[str, Any]] = TTLCache("yt_info", max_size=500, default_ttl=3600)
+yt_audio_cache: TTLCache[Tuple[str, str]] = TTLCache("yt_audio", max_size=200, default_ttl=1800)
 
 # In-flight search deduplication: cache_key -> asyncio.Task
 _inflight_searches: Dict[str, asyncio.Task] = {}
 
-# Audio stream URL cache: video_id -> (timestamp, stream_url, content_type)
-_audio_url_cache: Dict[str, Tuple[float, str, str]] = {}
-AUDIO_CACHE_TTL_SEC = 1800
+
+def get_youtube_cache_stats() -> Dict[str, Any]:
+    return {
+        "yt_search": yt_search_cache.stats(),
+        "yt_info": yt_info_cache.stats(),
+        "yt_audio": yt_audio_cache.stats(),
+    }
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -320,13 +326,18 @@ async def _innertube_web_search(query: str, limit: int = 8) -> List[Dict[str, An
 
 
 async def get_video_info(url_or_id: str, fast: bool = False) -> Optional[Dict[str, Any]]:
-    """Get video metadata from URL or ID. If fast=True, returns oEmbed immediately."""
+    """Get video metadata from URL or ID with 1-hour LRU+TTL caching."""
     video_id = extract_video_id(url_or_id)
     if not video_id:
         return None
 
+    cached_info = yt_info_cache.get(video_id)
+    if cached_info and (fast or cached_info.get("duration", 0) > 0):
+        return cached_info
+
     oembed_info = await get_video_oembed(video_id)
     if fast and oembed_info:
+        yt_info_cache.set(video_id, oembed_info)
         return oembed_info
 
     try:
@@ -337,7 +348,7 @@ async def get_video_info(url_or_id: str, fast: bool = False) -> Optional[Dict[st
             duration = data.get("duration") or 0
             title = data.get("title") or (oembed_info.get("title") if oembed_info else f"Video {video_id}")
             author = data.get("uploader") or data.get("channel") or (oembed_info.get("author") if oembed_info else "YouTube")
-            return {
+            info = {
                 "id": video_id,
                 "title": title,
                 "author": author,
@@ -346,10 +357,13 @@ async def get_video_info(url_or_id: str, fast: bool = False) -> Optional[Dict[st
                 "duration_str": format_duration(duration),
                 "views": "",
             }
+            yt_info_cache.set(video_id, info)
+            return info
     except Exception as e:
         print(f"[yt-dlp extract error] {e}")
 
     if oembed_info:
+        yt_info_cache.set(video_id, oembed_info)
         return oembed_info
 
     return {
@@ -408,22 +422,21 @@ async def _run_search_pipeline(query: str, limit: int) -> List[Dict[str, Any]]:
 
 
 async def search_youtube(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """Realtime YouTube search with Innertube JSON, TTL cache, and in-flight deduplication."""
+    """Realtime YouTube search with Innertube JSON, LRU+TTL cache, and in-flight deduplication."""
     query = query.strip()
     if not query:
         return []
 
-    # Direct YouTube URL / Video ID -> ultra-fast oEmbed path (~60-150ms)
+    # Direct YouTube URL / Video ID -> cached metadata / oEmbed (~0-150ms)
     video_id = extract_video_id(query)
     if video_id:
         info = await get_video_info(video_id, fast=True)
         return [info] if info else []
 
     cache_key = f"{query.lower()}::{limit}"
-    now = time.time()
-    cached = _search_cache.get(cache_key)
-    if cached and (now - cached[0]) < CACHE_TTL_SEC:
-        return cached[1]
+    cached = yt_search_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     # Coalesce concurrent identical searches
     task = _inflight_searches.get(cache_key)
@@ -438,10 +451,12 @@ async def search_youtube(query: str, limit: int = 8) -> List[Dict[str, Any]]:
             _inflight_searches.pop(cache_key, None)
 
     if items:
-        if len(_search_cache) >= CACHE_MAX_SIZE:
-            oldest_key = min(_search_cache, key=lambda k: _search_cache[k][0])
-            _search_cache.pop(oldest_key, None)
-        _search_cache[cache_key] = (time.time(), items)
+        yt_search_cache.set(cache_key, items)
+        # Warm per-video metadata cache for instant future URL pastes
+        for it in items:
+            vid = it.get("id")
+            if vid:
+                yt_info_cache.set(vid, it)
 
     return items
 
@@ -478,18 +493,16 @@ async def get_audio_stream_url(video_id: str) -> Optional[Tuple[str, str]]:
     if not clean_id:
         return None
 
-    now = time.time()
-    cached = _audio_url_cache.get(clean_id)
-    if cached and (now - cached[0]) < AUDIO_CACHE_TTL_SEC:
-        return cached[1], cached[2]
+    cached = yt_audio_cache.get(clean_id)
+    if cached is not None:
+        return cached
 
     loop = asyncio.get_running_loop()
     try:
         res = await loop.run_in_executor(None, _sync_extract_audio_url, clean_id)
         if res:
-            stream_url, content_type = res
-            _audio_url_cache[clean_id] = (now, stream_url, content_type)
-            return stream_url, content_type
+            yt_audio_cache.set(clean_id, res)
+            return res
     except Exception as e:
         print(f"[audio stream extract error] {e}")
     return None
