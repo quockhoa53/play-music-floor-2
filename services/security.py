@@ -127,27 +127,43 @@ def get_client_ip(headers, client) -> str:
 
 
 def is_valid_ws_origin(websocket) -> bool:
-    """Prevent Cross-Site WebSocket Hijacking (CSWSH) by validating Origin against Host."""
+    """Prevent Cross-Site WebSocket Hijacking (CSWSH) by validating Origin against Host / X-Forwarded-Host."""
     origin = websocket.headers.get("origin")
     if not origin:
         # Non-browser clients / TestClient do not send Origin
         return True
     host = websocket.headers.get("host")
-    if not host:
+    xf_host = websocket.headers.get("x-forwarded-host")
+    if not host and not xf_host:
         return False
+
+    def _norm_host(raw: str, scheme: str = "") -> str:
+        val = (raw or "").split(",")[0].strip().lower()
+        if scheme == "https" and val.endswith(":443"):
+            val = val[:-4]
+        elif scheme == "http" and val.endswith(":80"):
+            val = val[:-3]
+        return val
+
     try:
         parsed = urlparse(origin)
         if parsed.scheme not in ("http", "https"):
             return False
-        origin_host = (parsed.netloc or "").lower()
-        target_host = host.lower()
-        if origin_host == target_host:
-            return True
-        # Allow localhost <-> 127.0.0.1 on same port during local development
-        o_name, _, o_port = origin_host.partition(":")
-        t_name, _, t_port = target_host.partition(":")
-        if o_name in ("localhost", "127.0.0.1") and t_name in ("localhost", "127.0.0.1") and o_port == t_port:
-            return True
+        origin_host = _norm_host(parsed.netloc, parsed.scheme)
+        candidates = []
+        if host:
+            candidates.append(_norm_host(host, parsed.scheme))
+        if xf_host:
+            candidates.append(_norm_host(xf_host, parsed.scheme))
+
+        for target_host in candidates:
+            if origin_host == target_host:
+                return True
+            # Allow localhost <-> 127.0.0.1 on same port during local development
+            o_name, _, o_port = origin_host.partition(":")
+            t_name, _, t_port = target_host.partition(":")
+            if o_name in ("localhost", "127.0.0.1") and t_name in ("localhost", "127.0.0.1") and o_port == t_port:
+                return True
         return False
     except Exception:
         return False

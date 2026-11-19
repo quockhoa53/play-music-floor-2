@@ -49,8 +49,8 @@ function safeThumbUrl(videoId) {
     return 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80';
 }
 
-async function ensureSession(forceNew = false) {
-    if (!forceNew && window.appState.sessionToken && window.appState.userId) {
+async function ensureSession(forceNew = false, verifyServer = false) {
+    if (!forceNew && !verifyServer && window.appState.sessionToken && window.appState.userId) {
         return window.appState.sessionToken;
     }
     const headers = { 'Content-Type': 'application/json' };
@@ -501,7 +501,7 @@ function handleJoinRoom(e) {
 async function joinRoom(roomId, inviteToken = null) {
     const cleanId = roomId.trim().toLowerCase();
     try {
-        await ensureSession();
+        await ensureSession(false, true);
 
         // Pre-check room existence & private room access before switching views
         const query = inviteToken ? `?invite=${encodeURIComponent(inviteToken)}` : '';
@@ -952,6 +952,7 @@ function addTrackFromSearch(item, idx) {
 // =============================================================================
 function initSocketEvents() {
     const socket = window.roomSocket;
+    socket.setSessionRefresher(() => ensureSession(false, true));
 
     socket.on('init_state', (data) => {
         window.appState.roomData = data.room;

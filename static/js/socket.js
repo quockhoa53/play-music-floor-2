@@ -14,6 +14,11 @@ class RoomSocket {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.manualClose = false;
+        this.sessionRefresher = null;
+    }
+
+    setSessionRefresher(fn) {
+        this.sessionRefresher = typeof fn === 'function' ? fn : null;
     }
 
     on(event, callback) {
@@ -131,7 +136,21 @@ class RoomSocket {
 
         const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
         this.reconnectAttempts++;
-        this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = setTimeout(async () => {
+            if (this.manualClose || !this.roomId) return;
+            try {
+                // Re-validate or refresh session token before reconnecting (recovers seamlessly after server restart/redeploy)
+                if (this.sessionRefresher) {
+                    const freshToken = await this.sessionRefresher();
+                    if (freshToken) {
+                        this.sessionToken = freshToken;
+                    }
+                }
+            } catch (err) {
+                // Server may still be restarting — schedule next backoff attempt
+                this.scheduleReconnect();
+                return;
+            }
             if (!this.manualClose && this.roomId && this.sessionToken) {
                 this.connect(this.roomId, this.sessionToken, this.userData, this.inviteToken);
             }
