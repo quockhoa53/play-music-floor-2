@@ -1,113 +1,26 @@
-"""Persistent database layer: Supabase PostgreSQL (DATABASE_URL) -> Supabase REST (Secret Key) -> Local SQLite."""
+"""Persistent database layer: Supabase PostgreSQL (DATABASE_URL) -> Supabase REST (Secret Key) -> In-Memory fallback."""
 import asyncio
 import base64
 import json
 import os
-import sqlite3
-import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
-SCHEMA_STATEMENTS_SQLITE = [
-    """
-    CREATE TABLE IF NOT EXISTS rooms (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        host_id TEXT NOT NULL DEFAULT '',
-        dj_mode INTEGER NOT NULL DEFAULT 0,
-        is_private INTEGER NOT NULL DEFAULT 0,
-        passcode_hash TEXT NOT NULL DEFAULT '',
-        invite_token TEXT NOT NULL DEFAULT '',
-        current_track_json TEXT,
-        status TEXT NOT NULL DEFAULT 'idle',
-        playback_time REAL NOT NULL DEFAULT 0,
-        updated_at REAL NOT NULL DEFAULT 0,
-        created_at REAL NOT NULL DEFAULT 0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS room_queue (
-        uid TEXT PRIMARY KEY,
-        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-        position INTEGER NOT NULL,
-        video_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        author TEXT NOT NULL DEFAULT 'YouTube',
-        thumbnail TEXT NOT NULL DEFAULT '',
-        duration INTEGER NOT NULL DEFAULT 0,
-        duration_str TEXT NOT NULL DEFAULT '',
-        added_by_id TEXT NOT NULL DEFAULT '',
-        added_by_name TEXT NOT NULL DEFAULT 'Khách',
-        added_at REAL NOT NULL DEFAULT 0
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_room_queue_room_pos ON room_queue (room_id, position ASC)",
-    """
-    CREATE TABLE IF NOT EXISTS room_history (
-        id TEXT PRIMARY KEY,
-        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-        video_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        author TEXT NOT NULL DEFAULT 'YouTube',
-        thumbnail TEXT NOT NULL DEFAULT '',
-        duration INTEGER NOT NULL DEFAULT 0,
-        duration_str TEXT NOT NULL DEFAULT '',
-        added_by_id TEXT NOT NULL DEFAULT '',
-        added_by_name TEXT NOT NULL DEFAULT 'Khách',
-        played_at REAL NOT NULL DEFAULT 0
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_room_history_room_time ON room_history (room_id, played_at DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS room_messages (
-        id TEXT PRIMARY KEY,
-        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-        msg_type TEXT NOT NULL DEFAULT 'chat',
-        user_id TEXT NOT NULL DEFAULT '',
-        user_name TEXT NOT NULL DEFAULT '',
-        user_avatar TEXT NOT NULL DEFAULT '🎧',
-        user_color TEXT NOT NULL DEFAULT '#4f46e5',
-        is_host INTEGER NOT NULL DEFAULT 0,
-        text TEXT NOT NULL DEFAULT '',
-        media_type TEXT,
-        media_url TEXT,
-        created_at REAL NOT NULL DEFAULT 0
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_room_messages_room_time ON room_messages (room_id, created_at ASC)",
-    """
-    CREATE TABLE IF NOT EXISTS chat_media (
-        id TEXT PRIMARY KEY,
-        mime_type TEXT NOT NULL,
-        data_b64 TEXT NOT NULL,
-        uploader_id TEXT NOT NULL DEFAULT '',
-        created_at REAL NOT NULL DEFAULT 0
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_chat_media_created ON chat_media (created_at DESC)",
-]
-
 
 class DatabaseManager:
-    """Unified async-safe persistence layer supporting Postgres, Supabase REST, and SQLite fallback."""
+    """Unified async-safe persistence layer supporting Supabase Postgres and Supabase REST API."""
 
-    def __init__(self, sqlite_path: Optional[str] = None):
+    def __init__(self):
         self.backend_name: str = "memory"
         self.connected: bool = False
         self.database_url: str = ""
         self.supabase_url: str = ""
         self.supabase_secret_key: str = ""
-        self.sqlite_path: str = sqlite_path or os.getenv("SQLITE_DB_PATH") or str(
-            Path(__file__).resolve().parent.parent / "data" / "floor2.db"
-        )
-        self._sqlite_lock = threading.Lock()
-        self._sqlite_conn: Optional[sqlite3.Connection] = None
         self._rest_client: Optional[httpx.Client] = None
 
     def init(self):
-        """Initialize the best available database backend (Postgres > Supabase REST > SQLite)."""
+        """Initialize the best available Supabase backend (Postgres > Supabase REST > In-Memory)."""
         self.database_url = (os.getenv("DATABASE_URL") or "").strip()
         self.supabase_url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
         self.supabase_secret_key = (
@@ -136,26 +49,13 @@ class DatabaseManager:
                 print(f"[DB] Connected to Supabase REST ({self.supabase_url})")
                 return
             except Exception as e:
-                print(f"[DB] Supabase REST init failed ({e}), falling back to SQLite...")
+                print(f"[DB] Supabase REST init failed ({e}), running in-memory only")
 
-        # 3. Priority 3: Local SQLite fallback (works out-of-the-box offline & local)
-        try:
-            self._init_sqlite()
-            self.backend_name = "sqlite"
-            self.connected = True
-            print(f"[DB] Using local SQLite persistence ({self.sqlite_path})")
-        except Exception as e:
-            print(f"[DB] SQLite init failed ({e}), running in-memory only")
-            self.backend_name = "memory"
-            self.connected = False
+        self.backend_name = "memory"
+        self.connected = False
+        print("[DB] Supabase not configured — running in-memory only")
 
     def close(self):
-        if self._sqlite_conn:
-            try:
-                self._sqlite_conn.close()
-            except Exception:
-                pass
-            self._sqlite_conn = None
         if self._rest_client:
             try:
                 self._rest_client.close()
@@ -171,7 +71,7 @@ class DatabaseManager:
         return psycopg.connect(self.database_url, autocommit=True, connect_timeout=8)
 
     def _init_postgres(self):
-        # Schema is managed externally via supabase_schema.sql; only verify connection & table presence.
+        # Schema is managed externally in Supabase SQL Editor; only verify connection & table presence.
         with self._pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM rooms LIMIT 1")
@@ -186,25 +86,9 @@ class DatabaseManager:
             },
             timeout=8.0,
         )
-        # Verify 'rooms' table exists & secret key is valid
         r = self._rest_client.get("/rooms", params={"select": "id", "limit": "1"})
         if r.status_code != 200:
             raise RuntimeError(f"Supabase REST check returned HTTP {r.status_code}: {r.text[:180]}")
-
-    def _init_sqlite(self):
-        db_file = Path(self.sqlite_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
-        self._sqlite_conn = sqlite3.connect(str(db_file), check_same_thread=False)
-        self._sqlite_conn.row_factory = sqlite3.Row
-        with self._sqlite_lock:
-            self._sqlite_conn.execute("PRAGMA foreign_keys = ON")
-            self._sqlite_conn.execute("PRAGMA journal_mode = WAL")
-            for stmt in SCHEMA_STATEMENTS_SQLITE:
-                self._sqlite_conn.execute(stmt)
-            cols = {row[1] for row in self._sqlite_conn.execute("PRAGMA table_info(rooms)").fetchall()}
-            if "playback_time" not in cols:
-                self._sqlite_conn.execute("ALTER TABLE rooms ADD COLUMN playback_time DOUBLE PRECISION NOT NULL DEFAULT 0")
-            self._sqlite_conn.commit()
 
     def health_info(self) -> Dict[str, Any]:
         return {
@@ -224,8 +108,6 @@ class DatabaseManager:
                 return self._pg_load_all_rooms()
             if self.backend_name == "supabase_rest":
                 return self._rest_load_all_rooms()
-            if self.backend_name == "sqlite":
-                return self._sqlite_load_all_rooms()
         except Exception as e:
             print(f"[DB] load_all_rooms error: {e}")
         return []
@@ -273,21 +155,6 @@ class DatabaseManager:
                     cur.execute("SELECT * FROM room_messages WHERE room_id = %s ORDER BY created_at DESC LIMIT 100", (rid,))
                     m_rows = list(reversed(cur.fetchall()))
                     result.append(self._build_room_record(r, q_rows, h_rows, m_rows))
-        return result
-
-    def _sqlite_load_all_rooms(self) -> List[Dict[str, Any]]:
-        if not self._sqlite_conn:
-            return []
-        result = []
-        with self._sqlite_lock:
-            cur = self._sqlite_conn.cursor()
-            room_rows = [dict(x) for x in cur.execute("SELECT * FROM rooms ORDER BY created_at ASC").fetchall()]
-            for r in room_rows:
-                rid = r["id"]
-                q_rows = [dict(x) for x in cur.execute("SELECT * FROM room_queue WHERE room_id = ? ORDER BY position ASC", (rid,)).fetchall()]
-                h_rows = list(reversed([dict(x) for x in cur.execute("SELECT * FROM room_history WHERE room_id = ? ORDER BY played_at DESC LIMIT 30", (rid,)).fetchall()]))
-                m_rows = list(reversed([dict(x) for x in cur.execute("SELECT * FROM room_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 100", (rid,)).fetchall()]))
-                result.append(self._build_room_record(r, q_rows, h_rows, m_rows))
         return result
 
     def _rest_load_all_rooms(self) -> List[Dict[str, Any]]:
@@ -352,33 +219,6 @@ class DatabaseManager:
                             """,
                             vals,
                         )
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    self._sqlite_conn.execute(
-                        """
-                        INSERT INTO rooms (id, name, host_id, dj_mode, is_private, passcode_hash, invite_token,
-                            current_track_json, status, playback_time, updated_at, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                            name = excluded.name,
-                            host_id = excluded.host_id,
-                            dj_mode = excluded.dj_mode,
-                            is_private = excluded.is_private,
-                            passcode_hash = excluded.passcode_hash,
-                            invite_token = excluded.invite_token,
-                            current_track_json = excluded.current_track_json,
-                            status = excluded.status,
-                            playback_time = excluded.playback_time,
-                            updated_at = excluded.updated_at
-                        """,
-                        (
-                            vals["id"], vals["name"], vals["host_id"], int(vals["dj_mode"]),
-                            int(vals["is_private"]), vals["passcode_hash"], vals["invite_token"],
-                            vals["current_track_json"], vals["status"], vals["playback_time"],
-                            vals["updated_at"], vals["created_at"],
-                        ),
-                    )
-                    self._sqlite_conn.commit()
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 self._rest_client.post(
                     "/rooms",
@@ -423,22 +263,6 @@ class DatabaseManager:
                                 """,
                                 r,
                             )
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    self._sqlite_conn.execute("DELETE FROM room_queue WHERE room_id = ?", (room_id,))
-                    for r in rows:
-                        self._sqlite_conn.execute(
-                            """
-                            INSERT INTO room_queue (uid, room_id, position, video_id, title, author, thumbnail,
-                                duration, duration_str, added_by_id, added_by_name, added_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                r["uid"], r["room_id"], r["position"], r["video_id"], r["title"], r["author"],
-                                r["thumbnail"], r["duration"], r["duration_str"], r["added_by_id"], r["added_by_name"], r["added_at"],
-                            ),
-                        )
-                    self._sqlite_conn.commit()
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 self._rest_client.delete("/room_queue", params={"room_id": f"eq.{room_id}"})
                 if rows:
@@ -484,29 +308,6 @@ class DatabaseManager:
                             """,
                             (room_id, room_id),
                         )
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    self._sqlite_conn.execute(
-                        """
-                        INSERT INTO room_history (id, room_id, video_id, title, author, thumbnail,
-                            duration, duration_str, added_by_id, added_by_name, played_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            row["id"], row["room_id"], row["video_id"], row["title"], row["author"], row["thumbnail"],
-                            row["duration"], row["duration_str"], row["added_by_id"], row["added_by_name"], row["played_at"],
-                        ),
-                    )
-                    self._sqlite_conn.execute(
-                        """
-                        DELETE FROM room_history
-                        WHERE room_id = ? AND id NOT IN (
-                            SELECT id FROM room_history WHERE room_id = ? ORDER BY played_at DESC LIMIT 50
-                        )
-                        """,
-                        (room_id, room_id),
-                    )
-                    self._sqlite_conn.commit()
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 self._rest_client.post("/room_history", json=row)
         except Exception as e:
@@ -551,30 +352,6 @@ class DatabaseManager:
                             """,
                             (room_id, room_id),
                         )
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    self._sqlite_conn.execute(
-                        """
-                        INSERT INTO room_messages (id, room_id, msg_type, user_id, user_name, user_avatar,
-                            user_color, is_host, text, media_type, media_url, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            row["id"], row["room_id"], row["msg_type"], row["user_id"], row["user_name"],
-                            row["user_avatar"], row["user_color"], int(row["is_host"]), row["text"],
-                            row["media_type"], row["media_url"], row["created_at"],
-                        ),
-                    )
-                    self._sqlite_conn.execute(
-                        """
-                        DELETE FROM room_messages
-                        WHERE room_id = ? AND id NOT IN (
-                            SELECT id FROM room_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 150
-                        )
-                        """,
-                        (room_id, room_id),
-                    )
-                    self._sqlite_conn.commit()
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 self._rest_client.post("/room_messages", json=row)
         except Exception as e:
@@ -608,16 +385,6 @@ class DatabaseManager:
                             WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 80)
                             """
                         )
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    self._sqlite_conn.execute(
-                        "INSERT OR IGNORE INTO chat_media (id, mime_type, data_b64, uploader_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (row["id"], row["mime_type"], row["data_b64"], row["uploader_id"], row["created_at"]),
-                    )
-                    self._sqlite_conn.execute(
-                        "DELETE FROM chat_media WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 80)"
-                    )
-                    self._sqlite_conn.commit()
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 self._rest_client.post("/chat_media", json=row)
         except Exception as e:
@@ -634,13 +401,6 @@ class DatabaseManager:
                         row = cur.fetchone()
                         if row:
                             return base64.b64decode(row[1]), row[0], row[2]
-            elif self.backend_name == "sqlite" and self._sqlite_conn:
-                with self._sqlite_lock:
-                    row = self._sqlite_conn.execute(
-                        "SELECT mime_type, data_b64, uploader_id FROM chat_media WHERE id = ?", (media_id,)
-                    ).fetchone()
-                    if row:
-                        return base64.b64decode(row["data_b64"]), row["mime_type"], row["uploader_id"]
             elif self.backend_name == "supabase_rest" and self._rest_client:
                 r = self._rest_client.get("/chat_media", params={"id": f"eq.{media_id}", "select": "mime_type,data_b64,uploader_id"})
                 if r.status_code == 200 and r.json():

@@ -5,7 +5,6 @@ Run: python tests/smoke_test.py
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 # Keep smoke tests 100% offline/isolated (never touch real Supabase DB or spawn keep-alive pings)
@@ -14,8 +13,6 @@ os.environ["DATABASE_URL"] = ""
 os.environ["SUPABASE_URL"] = ""
 os.environ["SUPABASE_SECRET_KEY"] = ""
 os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
-_TMP_TEST_DIR = tempfile.TemporaryDirectory()
-os.environ["SQLITE_DB_PATH"] = str(Path(_TMP_TEST_DIR.name) / "smoke_test.db")
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -361,75 +358,120 @@ def test_websocket_auth_media_chat_access_control_and_ratelimit():
 
 
 def test_database_persistence_across_restart():
-    import tempfile
+    import json
+    import httpx
     from services.database import DatabaseManager
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = str(Path(tmpdir) / "test_persist.db")
-        db1 = DatabaseManager(sqlite_path=db_path)
-        db1.database_url = ""
-        db1.supabase_url = ""
-        db1.supabase_secret_key = ""
-        db1._init_sqlite()
-        db1.backend_name = "sqlite"
-        db1.connected = True
+    # In-memory fake Supabase PostgREST backend to verify full round-trip persistence offline
+    store = {"rooms": {}, "room_queue": [], "room_history": [], "room_messages": [], "chat_media": {}}
 
-        db1.save_room_sync({
-            "id": "persist-room",
-            "name": "Phòng Lưu Bền Vững",
-            "host_id": "u_host1",
-            "dj_mode": True,
-            "is_private": True,
-            "passcode_hash": hash_passcode("9999"),
-            "invite_token": "tok_invite_xyz",
-            "current_track": {
-                "uid": "ct1",
-                "id": "FN7ALfpGxiI",
-                "title": "Nơi Này Có Anh",
-                "author": "Sơn Tùng",
-                "thumbnail": "https://i.ytimg.com/vi/FN7ALfpGxiI/hqdefault.jpg",
-                "duration": 278,
-                "duration_str": "04:38",
-                "added_by_id": "u_host1",
-                "added_by_name": "Khoa",
-            },
-            "status": "playing",
-            "current_time": 45.0,
-        })
-        db1.replace_queue_sync("persist-room", [
-            {"uid": "q1", "id": "SlQR9iu09bQ", "title": "Bài Chờ 1", "author": "A", "thumbnail": "", "duration": 200, "duration_str": "03:20", "added_by_id": "u1", "added_by_name": "An"},
-            {"uid": "q2", "id": "knW7-x7Y7RE", "title": "Bài Chờ 2", "author": "B", "thumbnail": "", "duration": 263, "duration_str": "04:23", "added_by_id": "u2", "added_by_name": "Bình"},
-        ])
-        db1.add_history_sync("persist-room", {
-            "uid": "h1", "id": "kJQP7kiw5Fk", "title": "Bài Đã Nghe", "author": "C", "thumbnail": "", "duration": 282, "duration_str": "04:42", "added_by_id": "u1", "added_by_name": "An",
-        })
-        db1.add_message_sync("persist-room", {
-            "id": "m1", "type": "chat", "user_id": "u1", "user_name": "An", "user_avatar": "🎧", "user_color": "#4f46e5",
-            "is_host": False, "text": "Nhạc hay quá!", "media_type": "gif", "media_url": "https://media.giphy.com/media/GK7dGndK4kyOozR9Xk/giphy.gif",
-        })
-        db1.save_media_sync("abcdef0123456789", TINY_PNG, "image/png", "u1")
-        db1.close()
+    def handler(request: httpx.Request) -> httpx.Response:
+        table = request.url.path.rsplit("/", 1)[-1]
+        if request.method == "POST":
+            payload = json.loads(request.content.decode("utf-8"))
+            if table == "rooms":
+                store["rooms"][payload["id"]] = payload
+            elif table == "room_queue":
+                items = payload if isinstance(payload, list) else [payload]
+                store["room_queue"].extend(items)
+            elif table == "room_history":
+                store["room_history"].append(payload)
+            elif table == "room_messages":
+                store["room_messages"].append(payload)
+            elif table == "chat_media":
+                store["chat_media"][payload["id"]] = payload
+            return httpx.Response(201, json=payload)
 
-        # Simulate fresh server restart
-        db2 = DatabaseManager(sqlite_path=db_path)
-        db2._init_sqlite()
-        db2.backend_name = "sqlite"
-        db2.connected = True
-        loaded = db2.load_all_rooms()
-        assert len(loaded) == 1
-        r = loaded[0]
-        assert r["id"] == "persist-room"
-        assert r["is_private"] is True
-        assert r["invite_token"] == "tok_invite_xyz"
-        assert r["current_track"]["id"] == "FN7ALfpGxiI"
-        assert [q["video_id"] for q in r["queue"]] == ["SlQR9iu09bQ", "knW7-x7Y7RE"]
-        assert len(r["history"]) == 1 and r["history"][0]["video_id"] == "kJQP7kiw5Fk"
-        assert len(r["messages"]) == 1 and r["messages"][0]["text"] == "Nhạc hay quá!"
-        media = db2.get_media_sync("abcdef0123456789")
-        assert media is not None and media[0] == TINY_PNG and media[1] == "image/png"
-        db2.close()
+        if request.method == "DELETE":
+            if table == "room_queue":
+                rid = (request.url.params.get("room_id") or "").removeprefix("eq.")
+                store["room_queue"] = [x for x in store["room_queue"] if x["room_id"] != rid]
+            return httpx.Response(204)
 
-    print("[OK] Database persistence across restart")
+        if request.method == "GET":
+            if table == "rooms":
+                return httpx.Response(200, json=list(store["rooms"].values()))
+            if table == "room_queue":
+                rid = (request.url.params.get("room_id") or "").removeprefix("eq.")
+                rows = sorted([x for x in store["room_queue"] if x["room_id"] == rid], key=lambda x: x["position"])
+                return httpx.Response(200, json=rows)
+            if table == "room_history":
+                rid = (request.url.params.get("room_id") or "").removeprefix("eq.")
+                rows = [x for x in store["room_history"] if x["room_id"] == rid]
+                return httpx.Response(200, json=rows)
+            if table == "room_messages":
+                rid = (request.url.params.get("room_id") or "").removeprefix("eq.")
+                rows = [x for x in store["room_messages"] if x["room_id"] == rid]
+                return httpx.Response(200, json=rows)
+            if table == "chat_media":
+                mid = (request.url.params.get("id") or "").removeprefix("eq.")
+                item = store["chat_media"].get(mid)
+                return httpx.Response(200, json=[item] if item else [])
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    db1 = DatabaseManager()
+    db1.backend_name = "supabase_rest"
+    db1.connected = True
+    db1._rest_client = httpx.Client(base_url="https://mock.supabase.co/rest/v1", transport=transport)
+
+    db1.save_room_sync({
+        "id": "persist-room",
+        "name": "Phòng Lưu Bền Vững",
+        "host_id": "u_host1",
+        "dj_mode": True,
+        "is_private": True,
+        "passcode_hash": hash_passcode("9999"),
+        "invite_token": "tok_invite_xyz",
+        "current_track": {
+            "uid": "ct1",
+            "id": "FN7ALfpGxiI",
+            "title": "Nơi Này Có Anh",
+            "author": "Sơn Tùng",
+            "thumbnail": "https://i.ytimg.com/vi/FN7ALfpGxiI/hqdefault.jpg",
+            "duration": 278,
+            "duration_str": "04:38",
+            "added_by_id": "u_host1",
+            "added_by_name": "Khoa",
+        },
+        "status": "playing",
+        "current_time": 45.0,
+    })
+    db1.replace_queue_sync("persist-room", [
+        {"uid": "q1", "id": "SlQR9iu09bQ", "title": "Bài Chờ 1", "author": "A", "thumbnail": "", "duration": 200, "duration_str": "03:20", "added_by_id": "u1", "added_by_name": "An"},
+        {"uid": "q2", "id": "knW7-x7Y7RE", "title": "Bài Chờ 2", "author": "B", "thumbnail": "", "duration": 263, "duration_str": "04:23", "added_by_id": "u2", "added_by_name": "Bình"},
+    ])
+    db1.add_history_sync("persist-room", {
+        "uid": "h1", "id": "kJQP7kiw5Fk", "title": "Bài Đã Nghe", "author": "C", "thumbnail": "", "duration": 282, "duration_str": "04:42", "added_by_id": "u1", "added_by_name": "An",
+    })
+    db1.add_message_sync("persist-room", {
+        "id": "m1", "type": "chat", "user_id": "u1", "user_name": "An", "user_avatar": "🎧", "user_color": "#4f46e5",
+        "is_host": False, "text": "Nhạc hay quá!", "media_type": "gif", "media_url": "https://media.giphy.com/media/GK7dGndK4kyOozR9Xk/giphy.gif",
+    })
+    db1.save_media_sync("abcdef0123456789", TINY_PNG, "image/png", "u1")
+    db1.close()
+
+    # Simulate fresh server restart reading from Supabase REST
+    db2 = DatabaseManager()
+    db2.backend_name = "supabase_rest"
+    db2.connected = True
+    db2._rest_client = httpx.Client(base_url="https://mock.supabase.co/rest/v1", transport=transport)
+    loaded = db2.load_all_rooms()
+    assert len(loaded) == 1
+    r = loaded[0]
+    assert r["id"] == "persist-room"
+    assert r["is_private"] is True
+    assert r["invite_token"] == "tok_invite_xyz"
+    assert r["current_track"]["id"] == "FN7ALfpGxiI"
+    assert r["current_time"] == 45.0
+    assert [q["video_id"] for q in r["queue"]] == ["SlQR9iu09bQ", "knW7-x7Y7RE"]
+    assert len(r["history"]) == 1 and r["history"][0]["video_id"] == "kJQP7kiw5Fk"
+    assert len(r["messages"]) == 1 and r["messages"][0]["text"] == "Nhạc hay quá!"
+    media = db2.get_media_sync("abcdef0123456789")
+    assert media is not None and media[0] == TINY_PNG and media[1] == "image/png"
+    db2.close()
+
+    print("[OK] Supabase REST persistence across restart")
 
 
 def test_ttl_cache_and_http_cache_headers():
@@ -736,4 +778,3 @@ if __name__ == "__main__":
         print("ALL TESTS PASSED!")
     finally:
         db.close()
-        _TMP_TEST_DIR.cleanup()
