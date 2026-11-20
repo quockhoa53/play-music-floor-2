@@ -37,7 +37,7 @@
     </script>
 
     <!-- Custom Dual-Theme Stylesheet -->
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.11">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎵</text></svg>">
 </head>
 <body class="min-h-screen flex flex-col selection:bg-indigo-500 selection:text-white">
@@ -50,8 +50,24 @@
     </div>
     <div id="room-ambient-bg"></div>
 
-    <!-- Toast Notification Container -->
-    <div id="toast-container"></div>
+    <!-- Toast Notification Container (Bottom-Left Non-Obstructive, Anti-Spam) + Standard Template -->
+    <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+    <template id="toast-template">
+        <div class="toast-item rounded-2xl p-3 pr-2.5 flex items-start gap-2.5" role="status">
+            <div class="js-toast-icon w-7 h-7 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5"></div>
+            <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5">
+                    <div class="js-toast-title text-[11.5px] font-extrabold tracking-tight text-main leading-tight"></div>
+                    <span class="js-toast-dup hidden px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[10px] font-mono-num font-bold">×2</span>
+                </div>
+                <p class="js-toast-message text-[11.5px] text-sub leading-snug mt-0.5 line-clamp-2 break-words"></p>
+            </div>
+            <button type="button" class="js-toast-close w-6 h-6 rounded-lg text-dim hover:text-main hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center text-xs transition flex-shrink-0" aria-label="Đóng thông báo">
+                ✕
+            </button>
+            <div class="js-toast-progress toast-progress-bar"></div>
+        </div>
+    </template>
 
     <!-- ===================================================================== -->
     <!-- 1. LOBBY VIEW (Tạo / Chọn Phòng) -->
@@ -358,21 +374,25 @@
                 <!-- NOW PLAYING STAGE CARD -->
                 <section class="surface-card rounded-3xl p-4 md:p-5 overflow-hidden">
 
-                    <!-- Mode Switcher Bar: Video vs Radio -->
+                    <!-- Mode Switcher Bar: Radio (Default) -> Lyrics -> Video -->
                     <div class="flex items-center justify-between gap-2 mb-3.5">
                         <div class="flex items-center gap-2 min-w-0">
-                            <span id="stage-mode-dot" class="w-2 h-2 rounded-full bg-indigo-500"></span>
-                            <span id="stage-mode-heading" class="text-xs font-bold uppercase tracking-wider text-sub truncate">Sân khấu Video</span>
+                            <span id="stage-mode-dot" class="w-2 h-2 rounded-full bg-pink-500"></span>
+                            <span id="stage-mode-heading" class="text-xs font-bold uppercase tracking-wider text-sub truncate">Đài phát Radio • Không cần Video</span>
                         </div>
 
                         <div class="segmented-track p-1 rounded-xl inline-flex gap-1 flex-shrink-0">
-                            <button type="button" id="btn-mode-video" class="segmented-btn active px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem video YouTube">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
-                                <span>Video</span>
-                            </button>
-                            <button type="button" id="btn-mode-radio" class="segmented-btn px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Chế độ Radio — chỉ nghe nhạc không cần xem video">
+                            <button type="button" id="btn-mode-radio" class="segmented-btn active px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Chế độ Radio (mặc định) — chỉ nghe nhạc không cần xem video">
                                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
                                 <span>Radio</span>
+                            </button>
+                            <button type="button" id="btn-mode-lyrics" class="segmented-btn px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem lời bài hát chạy đồng bộ theo nhạc">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z"/></svg>
+                                <span>Lời bài hát</span>
+                            </button>
+                            <button type="button" id="btn-mode-video" class="segmented-btn px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem video YouTube">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                <span>Video</span>
                             </button>
                         </div>
                     </div>
@@ -470,6 +490,46 @@
                         </div>
                     </div>
 
+                    <!-- SYNCED LYRICS MODE DECK (Real-time Karaoke Highlight) -->
+                    <div id="lyrics-mode-deck" class="hidden lyrics-deck p-4 sm:p-5">
+                        <div id="lyrics-mode-bg" class="absolute inset-0 bg-cover bg-center scale-110 blur-2xl opacity-30 transition-all duration-700 pointer-events-none"></div>
+                        <div class="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-indigo-950/75 to-slate-950/90 pointer-events-none"></div>
+
+                        <div class="relative z-10 flex flex-col gap-3">
+                            <!-- Compact Track + Sync Controls Header -->
+                            <div class="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/10">
+                                <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                                    <img id="lyrics-track-thumb" src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80" alt="" class="w-10 h-10 rounded-xl object-cover border border-white/20 flex-shrink-0">
+                                    <div class="min-w-0 flex-1">
+                                        <h4 id="lyrics-track-title" class="font-extrabold text-sm text-white truncate">Lời bài hát đồng bộ</h4>
+                                        <p id="lyrics-track-author" class="text-[11px] text-white/65 truncate">Phát một bài hát để xem lời chạy theo nhạc</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-center gap-1.5 flex-shrink-0">
+                                    <span id="lyrics-sync-badge" class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-bold text-indigo-200">
+                                        Chờ nhạc
+                                    </span>
+                                    <!-- Fine-tune MV intro sync offset -->
+                                    <div id="lyrics-offset-controls" class="hidden inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-mono-num text-white/85" title="Chỉnh lệch nhịp lời (khi MV có đoạn mở đầu)">
+                                        <button type="button" id="btn-lyrics-offset-minus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời sớm hơn 0.5s">−0.5s</button>
+                                        <span id="lyrics-offset-value" class="px-1 text-indigo-200 font-bold">0s</span>
+                                        <button type="button" id="btn-lyrics-offset-plus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời chậm hơn 0.5s">+0.5s</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Scrollable Auto-Highlighted Lyrics Viewport -->
+                            <div id="lyrics-lines-container" class="lyrics-viewport no-scrollbar py-12 space-y-1.5">
+                                <div class="h-full flex flex-col items-center justify-center text-center px-4 text-white/65">
+                                    <span class="text-2xl mb-2">🎤</span>
+                                    <p class="text-xs sm:text-sm font-semibold text-white/85">Chưa có bài hát nào đang phát</p>
+                                    <p class="text-[11px] text-white/60 mt-1">Thêm một bài hát để lời bài hát tự động chạy và highlight theo nhạc!</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Empty Stage State (Shown in Video Mode when room is idle) -->
                     <div id="player-empty-state" class="hidden py-12 px-4 text-center rounded-2xl surface-subtle">
                         <div class="w-16 h-16 mx-auto rounded-2xl btn-gradient flex items-center justify-center mb-4 shadow-lg">
@@ -553,14 +613,27 @@
                     </div>
                 </section>
 
-                <!-- QUICK ADD SUGGESTIONS STRIP -->
+                <!-- QUICK ADD / RELATED SUGGESTIONS STRIP (10 SONGS, DRAG + WHEEL + ARROWS) -->
                 <section>
-                    <div class="flex items-center justify-between mb-2 px-1">
-                        <span class="text-xs font-bold text-sub uppercase tracking-wider">Thêm nhanh 1 chạm</span>
-                        <span class="text-[11px] text-dim">Bấm để xếp vào hàng đợi</span>
+                    <div class="flex items-center justify-between gap-2 mb-2 px-1">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <span id="quick-suggestions-title" class="text-xs font-bold text-sub uppercase tracking-wider truncate">Thêm nhanh 1 chạm</span>
+                            <span id="quick-suggestions-badge" class="hidden px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold flex-shrink-0">Liên quan</span>
+                        </div>
+                        <div class="flex items-center gap-2 flex-shrink-0">
+                            <span id="quick-suggestions-subtitle" class="text-[11px] text-dim hidden sm:inline">Kéo chuột hoặc cuộn ngang để xem 10 bài</span>
+                            <div class="inline-flex items-center gap-1">
+                                <button type="button" id="btn-suggestions-prev" class="surface-subtle w-6 h-6 rounded-full flex items-center justify-center text-sub hover:text-main transition disabled:opacity-35" title="Xem bài trước" aria-label="Cuộn trái">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+                                </button>
+                                <button type="button" id="btn-suggestions-next" class="surface-subtle w-6 h-6 rounded-full flex items-center justify-center text-sub hover:text-main transition disabled:opacity-35" title="Xem thêm bài" aria-label="Cuộn phải">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <div id="quick-suggestions-chips" class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-                        <!-- Populated via initQuickSuggestions() -->
+                    <div id="quick-suggestions-chips" class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 cursor-grab active:cursor-grabbing select-none">
+                        <!-- Populated via initQuickSuggestions() / loadRelatedSuggestionsForTrack() -->
                     </div>
                 </section>
 
@@ -661,16 +734,29 @@
                 <div id="tab-pane-chat" class="relative flex-1 min-h-0 flex flex-col overflow-hidden">
                     <div id="chat-messages-container" class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3.5 space-y-1"></div>
 
-                    <!-- EMOJI / ICON PICKER POPOVER -->
-                    <div id="emoji-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
-                        <div class="flex items-center justify-between mb-2 pb-1.5 border-b border-theme">
-                            <div id="emoji-category-tabs" class="flex items-center gap-1">
-                                <!-- Rendered via app.js -->
+                    <!-- ANIMATED STICKER (NHÃN DÁN) PICKER POPOVER -->
+                    <div id="sticker-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
+                        <div class="flex items-center gap-2 mb-2">
+                            <div class="relative flex-1">
+                                <input type="text" id="sticker-search-input" autocomplete="off"
+                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-xs font-medium"
+                                    placeholder="Tìm nhãn dán (cute, cat, love, music...)">
+                                <span id="sticker-search-spinner" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-indigo-500">
+                                    <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                                </span>
                             </div>
-                            <button type="button" id="btn-close-emoji-picker" class="w-6 h-6 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs">✕</button>
+                            <button type="button" id="btn-close-sticker-picker" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
                         </div>
-                        <div id="emoji-picker-grid" class="grid grid-cols-8 gap-1 max-h-44 overflow-y-auto pr-0.5">
-                            <!-- Rendered via app.js -->
+                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2">
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">✨ Nổi bật</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cute cat">🐱 Cute</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music dance">🎵 Nhạc</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="love heart">❤️ Tim</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="funny laugh">😂 Hài</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="party hype">🔥 Quẩy</button>
+                        </div>
+                        <div id="sticker-results-grid" class="grid grid-cols-3 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                            <!-- Populated dynamically -->
                         </div>
                     </div>
 
@@ -680,21 +766,25 @@
                             <div class="relative flex-1">
                                 <input type="text" id="gif-search-input" autocomplete="off"
                                     class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-xs font-medium"
-                                    placeholder="Tìm ảnh GIF (dance, cat, chill, love...)">
+                                    placeholder="Tìm ảnh GIF (dance, cat, anime, meme...)">
                                 <span id="gif-search-spinner" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-indigo-500">
                                     <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                                 </span>
                             </div>
                             <button type="button" id="btn-close-gif-picker" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
                         </div>
-                        <!-- Quick GIF Filter Chips -->
+                        <!-- Diverse Quick GIF Filter Chips -->
                         <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2">
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">🔥 Nổi bật</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cat dance">🐱 Mèo</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music vibe">🎵 Quẩy</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="love heart">❤️ Tim</button>
-                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="haha laugh">😂 Haha</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="funny laugh">😂 Haha</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="meme reaction">😎 Meme</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="anime chill">🌸 Anime</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="chill coffee">☕ Chill</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="applause clap">👏 Vỗ tay</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="party celebration">🥳 Party</button>
                         </div>
                         <div id="gif-results-grid" class="grid grid-cols-2 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
                             <!-- Populated dynamically -->
@@ -729,9 +819,9 @@
                     <form id="chat-input-form" class="p-2.5 border-t border-theme flex-shrink-0">
                         <input type="file" id="chat-image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
                         <div class="flex items-center gap-1.5">
-                            <!-- Media & Icon Buttons -->
-                            <button type="button" id="btn-toggle-emoji-picker" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-base flex-shrink-0" title="Chèn Icon / Emoji">
-                                😊
+                            <!-- Media Buttons (Sticker + GIF + Image Upload) -->
+                            <button type="button" id="btn-toggle-sticker-picker" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-sub hover:text-indigo-500 flex-shrink-0" title="Gửi Nhãn dán động">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             </button>
                             <button type="button" id="btn-toggle-gif-picker" class="surface-subtle h-9 px-2 rounded-full flex items-center justify-center text-[11px] font-extrabold tracking-tight text-indigo-600 dark:text-indigo-400 flex-shrink-0" title="Gửi ảnh GIF động">
                                 GIF
@@ -807,10 +897,32 @@
         </div>
     </div>
 
+    <!-- Reusable Styled Confirmation Modal (replaces native browser confirm()) -->
+    <div id="confirm-dialog-modal" class="hidden fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+        <div class="confirm-modal-card surface-dropdown max-w-sm w-full rounded-3xl p-6 space-y-5">
+            <div class="flex items-start gap-3.5">
+                <div id="confirm-dialog-icon" class="w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 bg-rose-500/15 text-rose-500">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                </div>
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-start justify-between gap-2">
+                        <h3 id="confirm-dialog-title" class="text-base font-extrabold text-main leading-snug">Xác nhận thao tác</h3>
+                        <button type="button" id="btn-close-confirm-dialog" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0" aria-label="Đóng">✕</button>
+                    </div>
+                    <p id="confirm-dialog-message" class="text-xs text-sub leading-relaxed mt-1.5"></p>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-2.5 pt-1">
+                <button type="button" id="btn-cancel-confirm-dialog" class="surface-subtle px-4 py-2.5 rounded-xl text-xs font-bold text-sub hover:text-main transition">Hủy</button>
+                <button type="button" id="btn-ok-confirm-dialog" class="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-rose-500 hover:bg-rose-600 shadow-md transition">Xác nhận</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
-    <script src="/static/js/socket.js?v=2.3"></script>
-    <script src="/static/js/player.js?v=2.3"></script>
-    <script src="/static/js/chat.js?v=2.3"></script>
-    <script src="/static/js/app.js?v=2.3"></script>
+    <script src="/static/js/socket.js?v=2.14"></script>
+    <script src="/static/js/player.js?v=2.14"></script>
+    <script src="/static/js/chat.js?v=2.14"></script>
+    <script src="/static/js/app.js?v=2.14"></script>
 </body>
 </html>

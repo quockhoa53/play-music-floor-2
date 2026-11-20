@@ -9,7 +9,8 @@ class SyncPlayer {
         this.isReady = false;
         this.currentTrack = null;
         this.status = 'idle'; // 'playing', 'paused', 'idle'
-        this.mode = localStorage.getItem('floor2_player_mode') || 'video'; // 'video' | 'radio'
+        const savedMode = localStorage.getItem('floor2_player_mode');
+        this.mode = ['radio', 'lyrics', 'video'].includes(savedMode) ? savedMode : 'radio'; // default: radio
         this.volume = parseInt(localStorage.getItem('floor2_volume') || '80', 10);
         this.isMuted = localStorage.getItem('floor2_muted') === 'true';
         this.isSyncing = false;
@@ -177,85 +178,91 @@ class SyncPlayer {
         }
     }
 
-    setMode(mode, notify = false) {
-        const cleanMode = mode === 'radio' ? 'radio' : 'video';
+    setMode(mode) {
+        const cleanMode = ['radio', 'lyrics', 'video'].includes(mode) ? mode : 'radio';
         this.mode = cleanMode;
         localStorage.setItem('floor2_player_mode', cleanMode);
         this.applyModeUI();
         this.updatePlayerUI();
 
-        if (notify) {
-            showToast(
-                cleanMode === 'radio'
-                    ? '📻 Đã bật Chế độ Radio — Nghe nhạc mượt không cần video'
-                    : '🎬 Đã chuyển sang Chế độ Video YouTube',
-                'info'
-            );
+        if (cleanMode === 'lyrics') {
+            if (typeof window.loadLyricsForTrack === 'function') {
+                window.loadLyricsForTrack(this.currentTrack);
+            }
+            if (typeof window.updateLyricsHighlight === 'function') {
+                window.updateLyricsHighlight(this.getCurrentTime(), true);
+            }
         }
     }
 
     applyModeUI() {
-        const isRadio = this.mode === 'radio' || this.useAudioFallback;
+        // When Pure Audio fallback is active, video cannot be shown (Radio or Lyrics both work!)
+        const effectiveMode = (this.useAudioFallback && this.mode === 'video') ? 'radio' : this.mode;
+        const isRadio = effectiveMode === 'radio';
+        const isLyrics = effectiveMode === 'lyrics';
+        const isVideo = effectiveMode === 'video';
+
         const iframeContainer = document.getElementById('youtube-iframe-container');
         const radioDeck = document.getElementById('radio-mode-deck');
+        const lyricsDeck = document.getElementById('lyrics-mode-deck');
         const emptyState = document.getElementById('player-empty-state');
         const videoMetaRow = document.getElementById('video-track-meta-row');
-        const btnVideo = document.getElementById('btn-mode-video');
         const btnRadio = document.getElementById('btn-mode-radio');
+        const btnLyrics = document.getElementById('btn-mode-lyrics');
+        const btnVideo = document.getElementById('btn-mode-video');
         const headerRadioBtn = document.getElementById('btn-header-radio-toggle');
         const stageHeading = document.getElementById('stage-mode-heading');
         const stageDot = document.getElementById('stage-mode-dot');
         const fallbackBadge = document.getElementById('radio-fallback-badge');
 
-        // Keep YouTube iframe alive in DOM (1px offscreen) so audio NEVER pauses or drops!
+        // Keep YouTube iframe alive in DOM (1px offscreen) in Radio & Lyrics modes so audio NEVER pauses!
         if (iframeContainer) {
-            if (isRadio || !this.currentTrack) {
+            if (!isVideo || !this.currentTrack) {
                 iframeContainer.classList.add('yt-audio-engine-hidden');
             } else {
                 iframeContainer.classList.remove('yt-audio-engine-hidden');
             }
         }
 
-        // Show Radio Deck whenever Radio Mode is active (both playing and standby)
-        if (radioDeck) {
-            radioDeck.classList.toggle('hidden', !isRadio);
-        }
+        if (radioDeck) radioDeck.classList.toggle('hidden', !isRadio);
+        if (lyricsDeck) lyricsDeck.classList.toggle('hidden', !isLyrics);
 
         // Show Video empty state ONLY in Video Mode when no track is playing
         if (emptyState) {
-            emptyState.classList.toggle('hidden', isRadio || !!this.currentTrack);
+            emptyState.classList.toggle('hidden', !isVideo || !!this.currentTrack);
         }
 
-        // Hide redundant track meta row in Radio Mode since Radio Deck displays it prominently
+        // Hide redundant track meta row in Radio & Lyrics modes since both decks display track info
         if (videoMetaRow) {
-            videoMetaRow.classList.toggle('hidden', isRadio);
+            videoMetaRow.classList.toggle('hidden', !isVideo);
         }
 
         if (fallbackBadge) {
             fallbackBadge.classList.toggle('hidden', !this.useAudioFallback);
         }
 
-        // Sync segmented switcher buttons
-        if (btnVideo && btnRadio) {
-            btnVideo.classList.toggle('active', !isRadio);
-            btnRadio.classList.toggle('active', isRadio);
-        }
+        // Sync segmented switcher buttons (Radio -> Lời bài hát -> Video)
+        if (btnRadio) btnRadio.classList.toggle('active', isRadio);
+        if (btnLyrics) btnLyrics.classList.toggle('active', isLyrics);
+        if (btnVideo) btnVideo.classList.toggle('active', isVideo);
 
         // Sync top header Radio quick pill
         if (headerRadioBtn) {
             headerRadioBtn.classList.toggle('border-pink-500/50', isRadio);
             headerRadioBtn.classList.toggle('bg-pink-500/10', isRadio);
             const lbl = headerRadioBtn.querySelector('.js-header-radio-label');
-            if (lbl) lbl.textContent = isRadio ? 'Radio: Bật' : 'Radio';
+            if (lbl) lbl.textContent = isRadio ? 'Radio: Bật' : (isLyrics ? 'Lời bài hát' : 'Radio');
         }
 
         if (stageHeading) {
-            stageHeading.textContent = isRadio ? 'Đài phát Radio • Không cần Video' : 'Sân khấu Video';
+            stageHeading.textContent = isRadio
+                ? 'Đài phát Radio • Không cần Video'
+                : (isLyrics ? 'Lời bài hát • Chạy đồng bộ theo nhạc' : 'Sân khấu Video');
         }
         if (stageDot) {
             stageDot.className = isRadio
                 ? 'w-2 h-2 rounded-full bg-pink-500 animate-pulse'
-                : 'w-2 h-2 rounded-full bg-indigo-500';
+                : (isLyrics ? 'w-2 h-2 rounded-full bg-violet-500 animate-pulse' : 'w-2 h-2 rounded-full bg-indigo-500');
         }
     }
 
@@ -464,7 +471,12 @@ class SyncPlayer {
 
             if (curEl) curEl.textContent = this.formatTime(cur);
             if (durEl) durEl.textContent = dur > 0 ? this.formatTime(dur) : (this.currentTrack.duration_str || 'LIVE');
-        }, 500);
+
+            // Smooth realtime synced lyrics highlight
+            if (this.mode === 'lyrics' && typeof window.updateLyricsHighlight === 'function') {
+                window.updateLyricsHighlight(cur);
+            }
+        }, 250);
     }
 
     formatTime(sec) {
@@ -506,6 +518,10 @@ class SyncPlayer {
         const playBtnIcon = document.getElementById('play-btn-icon');
         const equalizer = document.getElementById('now-playing-equalizer');
         const ambientBg = document.getElementById('room-ambient-bg');
+        const lyricsBg = document.getElementById('lyrics-mode-bg');
+        const lyricsThumb = document.getElementById('lyrics-track-thumb');
+        const lyricsTitle = document.getElementById('lyrics-track-title');
+        const lyricsAuthor = document.getElementById('lyrics-track-author');
 
         this.updateVolumeSliderFill();
 
@@ -518,6 +534,9 @@ class SyncPlayer {
             if (radioAuthor) radioAuthor.textContent = 'Gõ tên bài hát vào thanh tìm kiếm hoặc chọn gợi ý để lên sóng';
             if (radioAdder) radioAdder.innerHTML = '';
             if (radioBg) radioBg.style.backgroundImage = '';
+            if (lyricsBg) lyricsBg.style.backgroundImage = '';
+            if (lyricsTitle) lyricsTitle.textContent = 'Lời bài hát đồng bộ';
+            if (lyricsAuthor) lyricsAuthor.textContent = 'Phát một bài hát để xem lời chạy theo nhạc';
             if (radioOnAir) {
                 radioOnAir.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/15 border border-white/20 text-[10px] font-extrabold uppercase tracking-widest text-white';
                 radioOnAir.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>CHỜ PHÁT SÓNG`;
@@ -547,6 +566,10 @@ class SyncPlayer {
         if (radioBg) radioBg.style.backgroundImage = `url('${thumbUrl}')`;
         if (radioTitle) radioTitle.textContent = this.currentTrack.title;
         if (radioAuthor) radioAuthor.textContent = this.currentTrack.author || 'YouTube';
+        if (lyricsThumb) lyricsThumb.src = thumbUrl;
+        if (lyricsBg) lyricsBg.style.backgroundImage = `url('${thumbUrl}')`;
+        if (lyricsTitle) lyricsTitle.textContent = this.currentTrack.title;
+        if (lyricsAuthor) lyricsAuthor.textContent = this.currentTrack.author || 'YouTube';
         if (radioAdder) {
             radioAdder.innerHTML = `<span class="inline-flex items-center px-2 py-0.5 rounded-full bg-white/15 text-white/95 text-[10px] font-semibold">DJ: ${escapeHtml(this.currentTrack.added_by_name)}</span>`;
         }

@@ -106,7 +106,6 @@ function applyTheme(theme) {
 function toggleTheme() {
     const next = window.appState.theme === 'dark' ? 'light' : 'dark';
     applyTheme(next);
-    showToast(next === 'dark' ? 'Đã chuyển sang giao diện Tối (Midnight)' : 'Đã chuyển sang giao diện Sáng (Daylight)', 'info');
 }
 
 function updateThemeButtonsUI() {
@@ -124,36 +123,261 @@ function updateThemeButtonsUI() {
 }
 
 // =============================================================================
-// TOAST NOTIFICATIONS
+// TOAST NOTIFICATIONS (BOTTOM-LEFT NON-OBSTRUCTIVE, ZERO-LAG, ANTI-SPAM)
 // =============================================================================
-function showToast(message, type = 'info') {
+const TOAST_META = {
+    success: {
+        title: 'Thành công',
+        iconClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+        barClass: 'bg-emerald-500',
+        svg: `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`,
+    },
+    info: {
+        title: 'Thông báo',
+        iconClass: 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-400',
+        barClass: 'bg-indigo-500',
+        svg: `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+    },
+    warning: {
+        title: 'Lưu ý',
+        iconClass: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+        barClass: 'bg-amber-500',
+        svg: `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>`,
+    },
+    error: {
+        title: 'Có lỗi xảy ra',
+        iconClass: 'bg-rose-500/15 text-rose-600 dark:text-rose-400',
+        barClass: 'bg-rose-500',
+        svg: `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+    },
+};
+
+const activeToastsByKey = new Map();
+const MAX_VISIBLE_TOASTS = 2;
+
+function showToast(message, type = 'info', options = {}) {
     const container = document.getElementById('toast-container');
+    const tpl = document.getElementById('toast-template');
     if (!container) return;
 
-    const accentDots = {
-        info: 'bg-indigo-500',
-        success: 'bg-emerald-500',
-        warning: 'bg-amber-500',
-        error: 'bg-rose-500',
-    };
+    const cleanMsg = String(message || '').trim();
+    if (!cleanMsg) return;
 
-    const toast = document.createElement('div');
-    toast.className = 'toast-item flex items-center gap-2.5 px-4 py-2.5 rounded-full text-xs md:text-sm font-medium';
-    toast.innerHTML = `
-        <span class="w-2 h-2 rounded-full flex-shrink-0 ${accentDots[type] || accentDots.info}"></span>
-        <span>${escapeHtml(message)}</span>
-    `;
+    const meta = TOAST_META[type] || TOAST_META.info;
+    const duration = Number(options.duration || 2400);
+    const title = options.title || meta.title;
+    const dedupKey = `${type}::${cleanMsg}`;
 
-    container.appendChild(toast);
+    // Anti-spam deduplication: bump counter badge & refresh timer instead of spawning duplicate toasts
+    const existing = activeToastsByKey.get(dedupKey);
+    if (existing && existing.el && existing.el.isConnected) {
+        existing.count += 1;
+        existing.bump(duration);
+        return;
+    }
 
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateY(12px) scale(0.95)';
+    // Strictly cap visible toasts at 2 to prevent UI clutter or spam lag
+    while (container.children.length >= MAX_VISIBLE_TOASTS) {
+        const oldest = container.firstElementChild;
+        if (!oldest) break;
+        if (oldest._toastKey) activeToastsByKey.delete(oldest._toastKey);
+        if (oldest._toastTimer) clearTimeout(oldest._toastTimer);
+        oldest.remove();
+    }
+
+    let toast;
+    if (tpl && tpl.content && tpl.content.firstElementChild) {
+        toast = tpl.content.firstElementChild.cloneNode(true);
+    } else {
+        toast = document.createElement('div');
+        toast.className = 'toast-item rounded-2xl p-3 pr-2.5 flex items-start gap-2.5';
+        toast.innerHTML = `
+            <div class="js-toast-icon w-7 h-7 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5"></div>
+            <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5">
+                    <div class="js-toast-title text-[11.5px] font-extrabold tracking-tight text-main leading-tight"></div>
+                    <span class="js-toast-dup hidden px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[10px] font-mono-num font-bold">×2</span>
+                </div>
+                <p class="js-toast-message text-[11.5px] text-sub leading-snug mt-0.5 line-clamp-2 break-words"></p>
+            </div>
+            <button type="button" class="js-toast-close w-6 h-6 rounded-lg text-dim hover:text-main flex items-center justify-center text-xs transition flex-shrink-0">✕</button>
+            <div class="js-toast-progress toast-progress-bar"></div>
+        `;
+    }
+
+    toast._toastKey = dedupKey;
+    const iconEl = toast.querySelector('.js-toast-icon');
+    const titleEl = toast.querySelector('.js-toast-title');
+    const dupEl = toast.querySelector('.js-toast-dup');
+    const msgEl = toast.querySelector('.js-toast-message');
+    const closeBtn = toast.querySelector('.js-toast-close');
+    const barEl = toast.querySelector('.js-toast-progress');
+
+    if (iconEl) {
+        iconEl.className = `js-toast-icon w-7 h-7 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5 ${meta.iconClass}`;
+        iconEl.innerHTML = meta.svg;
+    }
+    if (titleEl) titleEl.textContent = title;
+    if (msgEl) msgEl.textContent = cleanMsg;
+    if (barEl) {
+        barEl.className = `js-toast-progress toast-progress-bar ${meta.barClass}`;
+        barEl.style.animationDuration = `${duration}ms`;
+    }
+
+    let dismissed = false;
+    let remainingMs = duration;
+    let startedAt = Date.now();
+    let timerId = null;
+
+    const dismiss = () => {
+        if (dismissed) return;
+        dismissed = true;
+        if (timerId) clearTimeout(timerId);
+        activeToastsByKey.delete(dedupKey);
+        toast.classList.add('toast-leaving');
         setTimeout(() => {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, 260);
-    }, 3200);
+        }, 190);
+    };
+
+    const startTimer = () => {
+        startedAt = Date.now();
+        timerId = setTimeout(dismiss, Math.max(200, remainingMs));
+        toast._toastTimer = timerId;
+    };
+
+    const entry = {
+        el: toast,
+        count: 1,
+        bump(newDuration) {
+            if (dismissed) return;
+            if (timerId) clearTimeout(timerId);
+            remainingMs = newDuration;
+            if (dupEl) {
+                dupEl.textContent = `×${this.count}`;
+                dupEl.classList.remove('hidden');
+            }
+            if (barEl) {
+                barEl.style.animation = 'none';
+                void barEl.offsetWidth;
+                barEl.style.animation = '';
+                barEl.style.animationDuration = `${newDuration}ms`;
+            }
+            startTimer();
+        },
+    };
+    activeToastsByKey.set(dedupKey, entry);
+
+    toast.addEventListener('mouseenter', () => {
+        if (timerId) {
+            clearTimeout(timerId);
+            timerId = null;
+            remainingMs = Math.max(200, remainingMs - (Date.now() - startedAt));
+        }
+    });
+
+    toast.addEventListener('mouseleave', () => {
+        if (!dismissed && !timerId) startTimer();
+    });
+
+    if (closeBtn) closeBtn.onclick = dismiss;
+
+    container.appendChild(toast);
+    startTimer();
 }
+window.showToast = showToast;
+
+// =============================================================================
+// REUSABLE CONFIRMATION DIALOG MODAL (REPLACES NATIVE window.confirm())
+// =============================================================================
+function showConfirmDialog({
+    title = 'Xác nhận thao tác',
+    message = 'Bạn có chắc chắn muốn tiếp tục?',
+    confirmText = 'Xác nhận',
+    cancelText = 'Hủy',
+    variant = 'danger',
+} = {}) {
+    const modal = document.getElementById('confirm-dialog-modal');
+    if (!modal) return Promise.resolve(false);
+
+    const titleEl = document.getElementById('confirm-dialog-title');
+    const msgEl = document.getElementById('confirm-dialog-message');
+    const iconEl = document.getElementById('confirm-dialog-icon');
+    const okBtn = document.getElementById('btn-ok-confirm-dialog');
+    const cancelBtn = document.getElementById('btn-cancel-confirm-dialog');
+    const closeBtn = document.getElementById('btn-close-confirm-dialog');
+
+    const variantStyles = {
+        danger: {
+            iconClass: 'w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 bg-rose-500/15 text-rose-500',
+            iconSvg: `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>`,
+            okClass: 'px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-rose-500 hover:bg-rose-600 shadow-md transition',
+        },
+        warning: {
+            iconClass: 'w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 bg-amber-500/15 text-amber-500',
+            iconSvg: `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>`,
+            okClass: 'px-5 py-2.5 rounded-xl text-xs font-bold text-slate-950 bg-amber-500 hover:bg-amber-600 shadow-md transition',
+        },
+        primary: {
+            iconClass: 'w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 bg-indigo-500/15 text-indigo-500',
+            iconSvg: `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+            okClass: 'btn-gradient px-5 py-2.5 rounded-xl text-xs font-bold shadow-md transition',
+        },
+    };
+
+    const style = variantStyles[variant] || variantStyles.danger;
+    if (titleEl) titleEl.textContent = title;
+    if (msgEl) msgEl.textContent = message;
+    if (iconEl) {
+        iconEl.className = style.iconClass;
+        iconEl.innerHTML = style.iconSvg;
+    }
+    if (okBtn) {
+        okBtn.className = style.okClass;
+        okBtn.textContent = confirmText;
+    }
+    if (cancelBtn) cancelBtn.textContent = cancelText;
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            modal.classList.add('hidden');
+            document.removeEventListener('keydown', onKeyDown);
+            modal.removeEventListener('click', onBackdropClick);
+            okBtn?.removeEventListener('click', onOk);
+            cancelBtn?.removeEventListener('click', onCancel);
+            closeBtn?.removeEventListener('click', onCancel);
+            resolve(result);
+        };
+
+        const onOk = () => finish(true);
+        const onCancel = () => finish(false);
+        const onBackdropClick = (e) => {
+            if (e.target === modal) finish(false);
+        };
+        const onKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                finish(false);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                finish(true);
+            }
+        };
+
+        okBtn?.addEventListener('click', onOk);
+        cancelBtn?.addEventListener('click', onCancel);
+        closeBtn?.addEventListener('click', onCancel);
+        modal.addEventListener('click', onBackdropClick);
+        document.addEventListener('keydown', onKeyDown);
+
+        modal.classList.remove('hidden');
+        okBtn?.focus();
+    });
+}
+window.showConfirmDialog = showConfirmDialog;
 
 // =============================================================================
 // INITIALIZATION
@@ -559,7 +783,11 @@ function leaveRoom() {
     window.appState.roomId = null;
     window.appState.inviteToken = null;
     window.appState.roomData = null;
+    window.appState.roomSuggestions = null;
+    window.appState.roomSuggestionsMode = 'curated';
     renderPriorityBanner(null);
+    resetRelatedSuggestions();
+    resetLyricsState();
 
     const ambientBg = document.getElementById('room-ambient-bg');
     if (ambientBg) ambientBg.classList.remove('active');
@@ -629,11 +857,32 @@ function initRealtimeSearch() {
         const list = document.getElementById('search-results-list');
         const header = document.getElementById('search-dropdown-header');
         if (!list) return;
-        if (header) header.textContent = 'Gợi ý nhanh — Gõ tên bài hoặc dán link YouTube để tìm tức thì';
 
-        searchState.results = window.appState.suggestions || [];
+        const hasPersonalized = Array.isArray(window.appState.roomSuggestions) && window.appState.roomSuggestions.length > 0;
+        const mode = window.appState.roomSuggestionsMode || 'curated';
+        if (header) {
+            header.textContent = (hasPersonalized && mode === 'room_history')
+                ? '✨ Gợi ý đa dạng theo lịch sử nghe của phòng — Gõ để tìm tức thì'
+                : 'Gợi ý nhanh đa thể loại — Gõ tên bài hoặc dán link YouTube để tìm tức thì';
+        }
+
+        searchState.results = hasPersonalized ? window.appState.roomSuggestions : (window.appState.suggestions || []);
         searchState.highlightedIndex = -1;
         renderSearchResultsList(searchState.results);
+
+        // Refresh room-personalized suggestions asynchronously in background if room history changed
+        if (window.appState.roomId) {
+            loadRoomQuickSuggestions(window.appState.roomId).then((updated) => {
+                if (updated && searchState.isOpen && !input.value.trim()) {
+                    const hdr = document.getElementById('search-dropdown-header');
+                    if (hdr && window.appState.roomSuggestionsMode === 'room_history') {
+                        hdr.textContent = '✨ Gợi ý đa dạng theo lịch sử nghe của phòng — Gõ để tìm tức thì';
+                    }
+                    searchState.results = window.appState.roomSuggestions || window.appState.suggestions || [];
+                    renderSearchResultsList(searchState.results);
+                }
+            });
+        }
     };
 
     const applyResultsToUI = (results, query, isDirectUrl) => {
@@ -934,7 +1183,6 @@ function updateSearchHighlight(scrollIntoView = true) {
 function addTrackFromSearch(item, idx) {
     window.roomSocket.addTrack(item);
     searchState.addedIds.add(item.id);
-    showToast(`Đã thêm vào hàng đợi: ${item.title}`, 'success');
 
     // Update just that button so user can keep adding more songs without losing context
     const row = document.querySelector(`#search-results-list .search-result-row[data-index="${idx}"]`);
@@ -965,6 +1213,7 @@ function initSocketEvents() {
 
         if (data.messages) {
             data.messages.forEach(m => window.roomChat.addMessage(m, true));
+            window.roomChat.scrollToBottom();
         }
 
         window.syncPlayer.syncWithRoomState(data.room);
@@ -990,6 +1239,9 @@ function initSocketEvents() {
         renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
         renderHistory();
+        loadRelatedSuggestionsForTrack(window.appState.roomData.current_track);
+        loadLyricsForTrack(window.appState.roomData.current_track);
+        loadRoomQuickSuggestions(window.appState.roomId);
 
         if (data.message) window.roomChat.addMessage(data.message);
     });
@@ -1011,6 +1263,7 @@ function initSocketEvents() {
         }
         renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
+        refreshVisibleSuggestionChips();
 
         if (data.message) window.roomChat.addMessage(data.message);
     });
@@ -1148,6 +1401,9 @@ function updateRoomUI(room) {
     renderQueue();
     renderHistory();
     renderMembers();
+    loadRelatedSuggestionsForTrack(room.current_track || null);
+    loadLyricsForTrack(room.current_track || null);
+    loadRoomQuickSuggestions(room.id);
 }
 
 function renderSkipVoteButton(skipVote) {
@@ -1404,7 +1660,6 @@ function renderQueue() {
                 const uids = queue.map(t => t.uid).filter(id => id !== track.uid);
                 uids.unshift(track.uid);
                 window.roomSocket.reorderQueue(uids);
-                showToast(`Đã đưa "${track.title}" lên phát tiếp theo`, 'info');
             };
         }
 
@@ -1450,7 +1705,6 @@ function renderHistory() {
 
         item.querySelector('.btn-replay-track').onclick = () => {
             window.roomSocket.addTrack(track);
-            showToast(`Đã thêm lại: ${track.title}`, 'success');
         };
 
         historyList.appendChild(item);
@@ -1564,34 +1818,41 @@ function initPlayerListeners() {
         };
     }
 
-    // Video / Radio Mode Switcher
+    // Stage Mode Switcher: Radio (Default) -> Lyrics -> Video
+    const btnModeLyrics = document.getElementById('btn-mode-lyrics');
+
+    if (btnModeRadio) {
+        btnModeRadio.onclick = () => {
+            window.syncPlayer.setMode('radio');
+        };
+    }
+
+    if (btnModeLyrics) {
+        btnModeLyrics.onclick = () => {
+            window.syncPlayer.setMode('lyrics');
+        };
+    }
+
     if (btnModeVideo) {
         btnModeVideo.onclick = () => {
             if (window.syncPlayer.useAudioFallback) {
                 showToast('Bài hát này đang phát qua luồng Pure Audio Radio vì bị chặn nhúng video', 'info');
                 return;
             }
-            window.syncPlayer.setMode('video', true);
-        };
-    }
-
-    if (btnModeRadio) {
-        btnModeRadio.onclick = () => {
-            window.syncPlayer.setMode('radio', true);
+            window.syncPlayer.setMode('video');
         };
     }
 
     if (btnHeaderRadio) {
         btnHeaderRadio.onclick = () => {
-            const nextMode = window.syncPlayer.mode === 'radio' ? 'video' : 'radio';
-            if (nextMode === 'video' && window.syncPlayer.useAudioFallback) {
-                showToast('Bài hát này đang phát qua luồng Pure Audio Radio vì bị chặn nhúng video', 'info');
-                return;
-            }
-            window.syncPlayer.setMode(nextMode, true);
+            const order = window.syncPlayer.useAudioFallback ? ['radio', 'lyrics'] : ['radio', 'lyrics', 'video'];
+            const idx = order.indexOf(window.syncPlayer.mode);
+            const nextMode = order[(idx + 1) % order.length];
+            window.syncPlayer.setMode(nextMode);
         };
     }
 
+    initLyricsControls();
     window.syncPlayer.applyModeUI();
 }
 
@@ -1617,8 +1878,17 @@ function initRoomControls() {
     document.getElementById('btn-share-room')?.addEventListener('click', copyInviteLink);
     document.getElementById('room-id-badge')?.addEventListener('click', copyInviteLink);
 
-    document.getElementById('btn-leave-room')?.addEventListener('click', () => {
-        if (confirm('Bạn có chắc muốn rời phòng?')) leaveRoom();
+    document.getElementById('btn-leave-room')?.addEventListener('click', async () => {
+        const confirmed = await showConfirmDialog({
+            title: 'Rời khỏi phòng nhạc?',
+            message: 'Bạn có chắc chắn muốn rời phòng hiện tại và quay lại sảnh chờ không?',
+            confirmText: 'Rời phòng',
+            cancelText: 'Ở lại',
+            variant: 'danger',
+        });
+        if (confirmed) {
+            leaveRoom();
+        }
     });
 
     const soundBtn = document.getElementById('btn-toggle-sound-fx');
@@ -1633,7 +1903,6 @@ function initRoomControls() {
         soundBtn.onclick = () => {
             const enabled = window.roomChat.toggleSound();
             updateSoundUI(enabled);
-            showToast(enabled ? 'Đã bật chuông thông báo' : 'Đã tắt chuông thông báo', 'info');
         };
     }
 
@@ -1787,34 +2056,13 @@ function initChatCollapse() {
 }
 
 // =============================================================================
-// RICH CHAT MEDIA: EMOJI PICKER, LIVE GIF SEARCH & IMAGE UPLOAD / PASTE
+// RICH CHAT MEDIA: ANIMATED STICKERS, DIVERSE GIF SEARCH & IMAGE UPLOAD / PASTE
 // =============================================================================
-const EMOJI_CATEGORIES = [
-    {
-        icon: '🎵',
-        label: 'Nhạc & Quẩy',
-        items: ['🎵', '🎶', '🎧', '🎤', '🎸', '🎹', '🥁', '🎷', '🔥', '✨', '💃', '🕺', '🎉', '🎊', '🥳', '🚀', '⚡', '🌟', '💥', '🔊', '📻', '💿', '🏆', '👑'],
-    },
-    {
-        icon: '😀',
-        label: 'Cảm xúc',
-        items: ['😀', '😄', '😁', '😂', '🤣', '🥹', '😍', '🥰', '😘', '😎', '🤩', '😇', '🤔', '😮', '😱', '😢', '😭', '😤', '😴', '🤯', '🫠', '🫡', '🤭', '😏'],
-    },
-    {
-        icon: '💖',
-        label: 'Tương tác',
-        items: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '💖', '💘', '💯', '👍', '👎', '👏', '🙌', '🤝', '🙏', '✌️', '🤘', '🫶', '👌', '💪', '👀', '💬'],
-    },
-    {
-        icon: '☕',
-        label: 'Chill & Đồ ăn',
-        items: ['☕', '🧋', '🍵', '🍻', '🥂', '🍷', '🍹', '🍕', '🍔', '🍟', '🍜', '🍣', '🍰', '🍉', '🍓', '🌙', '⭐', '🌈', '🌸', '🐱', '🐶', '🦊', '🐼', '🦋'],
-    },
-];
-
 let pendingPreviewObjectUrl = null;
 let gifSearchTimer = null;
 let gifAbortController = null;
+let stickerSearchTimer = null;
+let stickerAbortController = null;
 
 function clearPendingChatImage() {
     window.appState.pendingImageFile = null;
@@ -1897,75 +2145,143 @@ async function compressImageIfNeeded(file) {
 }
 
 function initChatRichMedia() {
-    const emojiPopover = document.getElementById('emoji-picker-popover');
+    const stickerPopover = document.getElementById('sticker-picker-popover');
     const gifPopover = document.getElementById('gif-picker-popover');
-    const emojiBtn = document.getElementById('btn-toggle-emoji-picker');
+    const stickerBtn = document.getElementById('btn-toggle-sticker-picker');
     const gifBtn = document.getElementById('btn-toggle-gif-picker');
     const uploadBtn = document.getElementById('btn-chat-upload-image');
     const fileInput = document.getElementById('chat-image-file-input');
     const chatInput = document.getElementById('chat-text-input');
 
     const closeAllPopovers = () => {
-        emojiPopover?.classList.add('hidden');
+        stickerPopover?.classList.add('hidden');
         gifPopover?.classList.add('hidden');
     };
 
-    // 1. EMOJI / ICON PICKER
-    const catTabs = document.getElementById('emoji-category-tabs');
-    const emojiGrid = document.getElementById('emoji-picker-grid');
-    let activeEmojiCat = 0;
+    // Prevent clicks inside either popover from bubbling to document and closing it
+    stickerPopover?.addEventListener('click', (e) => e.stopPropagation());
+    gifPopover?.addEventListener('click', (e) => e.stopPropagation());
 
-    const renderEmojiCategory = (catIdx) => {
-        activeEmojiCat = catIdx;
-        if (catTabs) {
-            catTabs.innerHTML = '';
-            EMOJI_CATEGORIES.forEach((cat, idx) => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = `px-2 py-1 rounded-lg text-sm transition ${idx === activeEmojiCat ? 'bg-indigo-500/20 ring-1 ring-indigo-500/40' : 'hover:bg-slate-500/10'}`;
-                b.textContent = cat.icon;
-                b.title = cat.label;
-                b.onclick = () => renderEmojiCategory(idx);
-                catTabs.appendChild(b);
-            });
+    const highlightTagChips = (selector, activeQuery) => {
+        document.querySelectorAll(selector).forEach(tag => {
+            const isMatch = (tag.getAttribute('data-q') || '') === activeQuery;
+            tag.classList.toggle('bg-indigo-500/20', isMatch);
+            tag.classList.toggle('text-indigo-600', isMatch);
+            tag.classList.toggle('dark:text-indigo-300', isMatch);
+            tag.classList.toggle('ring-1', isMatch);
+            tag.classList.toggle('ring-indigo-500/40', isMatch);
+        });
+    };
+
+    // 1. ANIMATED STICKER (NHÃN DÁN) PICKER (Curated + Live Search with Client Cache)
+    const stickerInput = document.getElementById('sticker-search-input');
+    const stickerGrid = document.getElementById('sticker-results-grid');
+    const stickerSpinner = document.getElementById('sticker-search-spinner');
+    const stickerCache = new Map();
+    const MEDIA_CACHE_TTL_MS = 10 * 60 * 1000;
+    let stickersLoadedOnce = false;
+
+    const renderStickerItems = (stickers) => {
+        if (!stickerGrid) return;
+        stickerGrid.innerHTML = '';
+        if (!stickers || stickers.length === 0) {
+            stickerGrid.innerHTML = `<div class="col-span-3 text-center py-6 text-xs text-dim">Không tìm thấy nhãn dán phù hợp</div>`;
+            return;
         }
-        if (emojiGrid) {
-            emojiGrid.innerHTML = '';
-            EMOJI_CATEGORIES[catIdx].items.forEach(em => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = 'h-8 rounded-lg hover:bg-indigo-500/15 active:scale-90 transition text-lg flex items-center justify-center';
-                b.textContent = em;
-                b.onclick = () => {
-                    if (chatInput) {
-                        const start = chatInput.selectionStart ?? chatInput.value.length;
-                        const end = chatInput.selectionEnd ?? chatInput.value.length;
-                        chatInput.value = chatInput.value.slice(0, start) + em + chatInput.value.slice(end);
-                        const nextPos = start + em.length;
-                        chatInput.setSelectionRange(nextPos, nextPos);
-                        chatInput.focus();
-                    }
-                };
-                emojiGrid.appendChild(b);
-            });
+        stickers.forEach(st => {
+            if (!/^[A-Za-z0-9]{8,28}$/.test(st.id || '')) return;
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'relative h-20 p-1.5 rounded-xl overflow-hidden surface-subtle hover:border-indigo-500 transition group flex items-center justify-center';
+            card.innerHTML = `<img src="https://media.giphy.com/media/${st.id}/200w.gif" alt="Nhãn dán" loading="lazy" class="w-full h-full object-contain group-hover:scale-110 transition-transform duration-200">`;
+            card.onclick = () => {
+                window.roomSocket.sendSticker(st.id);
+                closeAllPopovers();
+            };
+            stickerGrid.appendChild(card);
+        });
+    };
+
+    const loadStickers = async (query = '') => {
+        if (!stickerGrid) return;
+        const cacheKey = (query || '').trim().toLowerCase();
+        highlightTagChips('.js-sticker-tag', query);
+
+        const cached = stickerCache.get(cacheKey);
+        if (cached && (Date.now() - cached.ts) < MEDIA_CACHE_TTL_MS) {
+            if (stickerAbortController) stickerAbortController.abort();
+            stickerSpinner?.classList.add('hidden');
+            stickersLoadedOnce = true;
+            renderStickerItems(cached.items);
+            return;
+        }
+
+        if (stickerAbortController) stickerAbortController.abort();
+        const controller = new AbortController();
+        stickerAbortController = controller;
+
+        stickerSpinner?.classList.remove('hidden');
+        if (!stickersLoadedOnce || stickerGrid.children.length === 0) {
+            stickerGrid.innerHTML = Array.from({ length: 6 }).map(() => `<div class="h-20 rounded-xl skeleton-box"></div>`).join('');
+        }
+
+        try {
+            const res = await fetch(`/api/stickers/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+            const data = await res.json();
+            if (controller.signal.aborted) return;
+
+            stickersLoadedOnce = true;
+            const items = data.stickers || [];
+            if (items.length > 0) {
+                if (stickerCache.size >= 50) {
+                    const oldestKey = stickerCache.keys().next().value;
+                    stickerCache.delete(oldestKey);
+                }
+                stickerCache.set(cacheKey, { ts: Date.now(), items });
+            }
+            renderStickerItems(items);
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+        } finally {
+            if (stickerAbortController === controller) {
+                stickerSpinner?.classList.add('hidden');
+            }
         }
     };
-    renderEmojiCategory(0);
 
-    emojiBtn?.addEventListener('click', (e) => {
+    stickerBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
-        const willOpen = emojiPopover?.classList.contains('hidden');
+        const willOpen = stickerPopover?.classList.contains('hidden');
         closeAllPopovers();
-        if (willOpen) emojiPopover?.classList.remove('hidden');
+        if (willOpen) {
+            stickerPopover?.classList.remove('hidden');
+            if (!stickersLoadedOnce) loadStickers('');
+            stickerInput?.focus();
+        }
     });
-    document.getElementById('btn-close-emoji-picker')?.addEventListener('click', closeAllPopovers);
+    document.getElementById('btn-close-sticker-picker')?.addEventListener('click', closeAllPopovers);
 
-    // 2. GIF PICKER (Curated + Live Search with Client-Side LRU+TTL Cache)
+    stickerInput?.addEventListener('input', () => {
+        if (stickerSearchTimer) clearTimeout(stickerSearchTimer);
+        stickerSearchTimer = setTimeout(() => {
+            loadStickers(stickerInput.value.trim());
+        }, 260);
+    });
+
+    document.querySelectorAll('.js-sticker-tag').forEach(tag => {
+        tag.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const q = tag.getAttribute('data-q') || '';
+            if (stickerInput) stickerInput.value = q;
+            loadStickers(q);
+        });
+    });
+
+    // 2. DIVERSE GIF PICKER (30 Curated + Live Search with Client-Side LRU+TTL Cache)
     const gifInput = document.getElementById('gif-search-input');
     const gifGrid = document.getElementById('gif-results-grid');
     const gifSpinner = document.getElementById('gif-search-spinner');
     const gifCache = new Map(); // query -> { ts, gifs }
-    const GIF_CACHE_TTL_MS = 10 * 60 * 1000;
     let gifsLoadedOnce = false;
 
     const renderGifItems = (gifs) => {
@@ -1992,8 +2308,10 @@ function initChatRichMedia() {
     const loadGifs = async (query = '') => {
         if (!gifGrid) return;
         const cacheKey = (query || '').trim().toLowerCase();
+        highlightTagChips('.js-gif-tag', query);
+
         const cached = gifCache.get(cacheKey);
-        if (cached && (Date.now() - cached.ts) < GIF_CACHE_TTL_MS) {
+        if (cached && (Date.now() - cached.ts) < MEDIA_CACHE_TTL_MS) {
             if (gifAbortController) gifAbortController.abort();
             gifSpinner?.classList.add('hidden');
             gifsLoadedOnce = true;
@@ -2054,7 +2372,8 @@ function initChatRichMedia() {
     });
 
     document.querySelectorAll('.js-gif-tag').forEach(tag => {
-        tag.addEventListener('click', () => {
+        tag.addEventListener('click', (e) => {
+            e.stopPropagation();
             const q = tag.getAttribute('data-q') || '';
             if (gifInput) gifInput.value = q;
             loadGifs(q);
@@ -2092,14 +2411,14 @@ function initChatRichMedia() {
     // Close popovers on outside click
     document.addEventListener('click', (e) => {
         if (
-            emojiPopover && !emojiPopover.classList.contains('hidden') &&
-            !emojiPopover.contains(e.target) && e.target !== emojiBtn
+            stickerPopover && !stickerPopover.classList.contains('hidden') &&
+            !stickerPopover.contains(e.target) && !stickerBtn?.contains(e.target)
         ) {
-            emojiPopover.classList.add('hidden');
+            stickerPopover.classList.add('hidden');
         }
         if (
             gifPopover && !gifPopover.classList.contains('hidden') &&
-            !gifPopover.contains(e.target) && e.target !== gifBtn
+            !gifPopover.contains(e.target) && !gifBtn?.contains(e.target)
         ) {
             gifPopover.classList.add('hidden');
         }
@@ -2134,13 +2453,314 @@ function initLightbox() {
 }
 
 // =============================================================================
-// QUICK SUGGESTIONS STRIP (WITH SESSION STORAGE CACHE)
+// QUICK SUGGESTIONS & DYNAMIC RELATED SONGS STRIP (10 ITEMS, DRAG + WHEEL + ARROWS)
 // =============================================================================
-const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v1';
+const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v3';
 const SUGGESTIONS_CACHE_TTL_MS = 5 * 60 * 1000;
+const RELATED_CACHE_TTL_MS = 15 * 60 * 1000;
+const MAX_SUGGESTION_CHIPS = 10;
+
+const roomQuickSugState = {
+    lastSig: '',
+    fetchingSig: '',
+};
+
+async function loadRoomQuickSuggestions(roomId) {
+    if (!roomId) return false;
+    const rd = window.appState.roomData;
+    const histTail = ((rd && rd.history) || []).slice(-4).map(t => t.id).join(',');
+    const curId = (rd && rd.current_track && rd.current_track.id) || '';
+    const sig = `${roomId}|${curId}|${histTail}`;
+
+    if (roomQuickSugState.lastSig === sig && Array.isArray(window.appState.roomSuggestions)) {
+        return false;
+    }
+    if (roomQuickSugState.fetchingSig === sig) {
+        return false;
+    }
+    roomQuickSugState.fetchingSig = sig;
+
+    try {
+        const params = new URLSearchParams({ limit: '10' });
+        if (window.appState.inviteToken) params.set('invite', window.appState.inviteToken);
+        const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/suggestions?${params.toString()}`, {
+            headers: getAuthHeaders(),
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        const items = Array.isArray(data.suggestions) ? data.suggestions : [];
+        if (items.length > 0 && window.appState.roomId === roomId) {
+            window.appState.roomSuggestions = items;
+            window.appState.roomSuggestionsMode = data.mode || 'curated';
+            roomQuickSugState.lastSig = sig;
+            // Also refresh idle quick-add chips strip if no track is playing
+            if (!relatedSuggestionsState.currentItems) {
+                renderQuickSuggestionChips(items, false);
+            }
+            return true;
+        }
+    } catch (_) {
+        // Fallback silently to curated suggestions
+    } finally {
+        if (roomQuickSugState.fetchingSig === sig) {
+            roomQuickSugState.fetchingSig = '';
+        }
+    }
+    return false;
+}
+
+const relatedSuggestionsState = {
+    cache: new Map(), // videoId -> { ts, items }
+    lastVideoId: null,
+    currentItems: null, // raw related items for active track (null = default curated)
+    abortController: null,
+    suppressClickUntil: 0,
+    scrollControlsBound: false,
+};
+
+function updateSuggestionsNavButtons() {
+    const container = document.getElementById('quick-suggestions-chips');
+    const prevBtn = document.getElementById('btn-suggestions-prev');
+    const nextBtn = document.getElementById('btn-suggestions-next');
+    if (!container || !prevBtn || !nextBtn) return;
+
+    const maxScroll = Math.max(0, container.scrollWidth - container.clientWidth);
+    prevBtn.disabled = container.scrollLeft <= 2;
+    nextBtn.disabled = container.scrollLeft >= maxScroll - 2;
+}
+
+function initSuggestionsHorizontalScroll() {
+    if (relatedSuggestionsState.scrollControlsBound) return;
+    const container = document.getElementById('quick-suggestions-chips');
+    if (!container) return;
+    relatedSuggestionsState.scrollControlsBound = true;
+
+    let isDown = false;
+    let startX = 0;
+    let startScrollLeft = 0;
+    let dragged = false;
+
+    container.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        isDown = true;
+        dragged = false;
+        startX = e.pageX;
+        startScrollLeft = container.scrollLeft;
+        container.classList.add('cursor-grabbing');
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDown) return;
+        const dx = e.pageX - startX;
+        if (Math.abs(dx) > 6) {
+            dragged = true;
+            e.preventDefault();
+            container.scrollLeft = startScrollLeft - dx * 1.15;
+            updateSuggestionsNavButtons();
+        }
+    });
+
+    const endDrag = () => {
+        if (!isDown) return;
+        isDown = false;
+        container.classList.remove('cursor-grabbing');
+        if (dragged) {
+            // Prevent accidental song click right after dragging
+            relatedSuggestionsState.suppressClickUntil = Date.now() + 180;
+        }
+    };
+    window.addEventListener('mouseup', endDrag);
+
+    // Mouse wheel vertical scroll -> smooth horizontal scroll while hovering over chips
+    container.addEventListener('wheel', (e) => {
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && container.scrollWidth > container.clientWidth) {
+            e.preventDefault();
+            container.scrollLeft += e.deltaY * 0.9;
+            updateSuggestionsNavButtons();
+        }
+    }, { passive: false });
+
+    container.addEventListener('scroll', updateSuggestionsNavButtons, { passive: true });
+    window.addEventListener('resize', updateSuggestionsNavButtons, { passive: true });
+
+    document.getElementById('btn-suggestions-prev')?.addEventListener('click', () => {
+        container.scrollBy({ left: -340, behavior: 'smooth' });
+    });
+    document.getElementById('btn-suggestions-next')?.addEventListener('click', () => {
+        container.scrollBy({ left: 340, behavior: 'smooth' });
+    });
+}
+
+function resetRelatedSuggestions() {
+    if (relatedSuggestionsState.abortController) {
+        relatedSuggestionsState.abortController.abort();
+        relatedSuggestionsState.abortController = null;
+    }
+    relatedSuggestionsState.lastVideoId = null;
+    relatedSuggestionsState.currentItems = null;
+    renderQuickSuggestionChips(window.appState.suggestions || [], false);
+}
+
+function renderQuickSuggestionSkeletons() {
+    const container = document.getElementById('quick-suggestions-chips');
+    const titleEl = document.getElementById('quick-suggestions-title');
+    const badgeEl = document.getElementById('quick-suggestions-badge');
+    if (titleEl) titleEl.textContent = '✨ Đang tìm bài hát liên quan...';
+    if (badgeEl) badgeEl.classList.remove('hidden');
+    if (!container) return;
+    container.innerHTML = Array.from({ length: 5 }).map(() => `
+        <div class="surface-subtle flex items-center gap-2.5 pl-1.5 pr-3 py-1.5 rounded-full flex-shrink-0 w-52">
+            <div class="w-7 h-7 rounded-full skeleton-box flex-shrink-0"></div>
+            <div class="flex-1 space-y-1">
+                <div class="h-2.5 w-28 rounded skeleton-box"></div>
+                <div class="h-2 w-16 rounded skeleton-box"></div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderQuickSuggestionChips(songs, isRelated = false) {
+    const container = document.getElementById('quick-suggestions-chips');
+    const titleEl = document.getElementById('quick-suggestions-title');
+    const badgeEl = document.getElementById('quick-suggestions-badge');
+    if (titleEl) {
+        titleEl.textContent = isRelated ? '✨ Gợi ý liên quan đến bài đang phát' : 'Thêm nhanh 1 chạm';
+    }
+    if (badgeEl) {
+        badgeEl.classList.toggle('hidden', !isRelated);
+    }
+    if (!container) return;
+
+    const roomData = window.appState.roomData;
+    const playingId = roomData && roomData.current_track ? roomData.current_track.id : null;
+    const queuedIds = new Set(((roomData && roomData.queue) || []).map(t => t.id));
+
+    // Exclude currently playing track; keep queued tracks out when showing related songs
+    let filtered = (songs || []).filter(s => s && s.id && s.id !== playingId && (!isRelated || !queuedIds.has(s.id)));
+    if (filtered.length === 0 && isRelated) {
+        filtered = (songs || []).filter(s => s && s.id && s.id !== playingId);
+    }
+    if (filtered.length === 0) {
+        filtered = window.appState.suggestions || [];
+        if (titleEl) titleEl.textContent = 'Thêm nhanh 1 chạm';
+        if (badgeEl) badgeEl.classList.add('hidden');
+    }
+
+    // Show up to 10 songs cleanly
+    filtered = filtered.slice(0, MAX_SUGGESTION_CHIPS);
+
+    container.innerHTML = '';
+    filtered.forEach(song => {
+        const isQueued = queuedIds.has(song.id);
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.draggable = false;
+        chip.className = 'surface-subtle flex items-center gap-2.5 pl-1.5 pr-3 py-1.5 rounded-full text-left flex-shrink-0 group hover:border-indigo-500/40 transition';
+        chip.title = `${song.title}${song.author ? ' — ' + song.author : ''}${song.duration_str ? ' (' + song.duration_str + ')' : ''}`;
+
+        const subMeta = [song.author, song.duration_str].filter(Boolean).join(' • ');
+        chip.innerHTML = `
+            <img src="${safeThumbUrl(song.id)}" alt="" draggable="false" class="w-7 h-7 rounded-full object-cover shadow-sm flex-shrink-0 pointer-events-none" loading="lazy">
+            <div class="min-w-0 max-w-[175px]">
+                <div class="text-xs font-semibold text-main truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(song.title)}</div>
+                ${subMeta ? `<div class="text-[10px] text-dim truncate leading-tight">${escapeHtml(subMeta)}</div>` : ''}
+            </div>
+            <span class="js-chip-plus w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold transition flex-shrink-0 ${
+                isQueued
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 group-hover:bg-indigo-600 group-hover:text-white'
+            }">${isQueued ? '✓' : '+'}</span>
+        `;
+
+        chip.onclick = (e) => {
+            if (Date.now() < relatedSuggestionsState.suppressClickUntil) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
+            window.roomSocket.addTrack(song);
+            const badge = chip.querySelector('.js-chip-plus');
+            if (badge) {
+                badge.textContent = '✓';
+                badge.className = 'js-chip-plus w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold transition flex-shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
+            }
+        };
+
+        container.appendChild(chip);
+    });
+
+    requestAnimationFrame(updateSuggestionsNavButtons);
+}
+
+function refreshVisibleSuggestionChips() {
+    if (relatedSuggestionsState.currentItems && relatedSuggestionsState.currentItems.length > 0) {
+        renderQuickSuggestionChips(relatedSuggestionsState.currentItems, true);
+    } else {
+        renderQuickSuggestionChips(window.appState.suggestions || [], false);
+    }
+}
+
+async function loadRelatedSuggestionsForTrack(track) {
+    const vid = track && track.id ? track.id : null;
+    if (!vid) {
+        resetRelatedSuggestions();
+        return;
+    }
+
+    if (relatedSuggestionsState.lastVideoId === vid && relatedSuggestionsState.currentItems) {
+        renderQuickSuggestionChips(relatedSuggestionsState.currentItems, true);
+        return;
+    }
+
+    relatedSuggestionsState.lastVideoId = vid;
+
+    // Instant 0ms client-side cache hit
+    const cached = relatedSuggestionsState.cache.get(vid);
+    if (cached && (Date.now() - cached.ts) < RELATED_CACHE_TTL_MS) {
+        if (relatedSuggestionsState.abortController) relatedSuggestionsState.abortController.abort();
+        relatedSuggestionsState.currentItems = cached.items;
+        renderQuickSuggestionChips(cached.items, cached.items.length > 0);
+        return;
+    }
+
+    if (relatedSuggestionsState.abortController) {
+        relatedSuggestionsState.abortController.abort();
+    }
+    const controller = new AbortController();
+    relatedSuggestionsState.abortController = controller;
+
+    renderQuickSuggestionSkeletons();
+
+    try {
+        const res = await fetch(`/api/youtube/related/${encodeURIComponent(vid)}?limit=14`, {
+            signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+
+        const items = Array.isArray(data.suggestions) ? data.suggestions : [];
+        if (items.length > 0) {
+            if (relatedSuggestionsState.cache.size >= 60) {
+                const oldestKey = relatedSuggestionsState.cache.keys().next().value;
+                relatedSuggestionsState.cache.delete(oldestKey);
+            }
+            relatedSuggestionsState.cache.set(vid, { ts: Date.now(), items });
+            relatedSuggestionsState.currentItems = items;
+            renderQuickSuggestionChips(items, true);
+        } else {
+            relatedSuggestionsState.currentItems = null;
+            renderQuickSuggestionChips(window.appState.suggestions || [], false);
+        }
+    } catch (err) {
+        if (err.name === 'AbortError') return;
+        relatedSuggestionsState.currentItems = null;
+        renderQuickSuggestionChips(window.appState.suggestions || [], false);
+    }
+}
 
 async function initQuickSuggestions() {
-    const container = document.getElementById('quick-suggestions-chips');
+    initSuggestionsHorizontalScroll();
     try {
         let suggestions = null;
         try {
@@ -2163,33 +2783,291 @@ async function initQuickSuggestions() {
         }
 
         window.appState.suggestions = suggestions;
-
-        if (!container) return;
-        container.innerHTML = '';
-
-        suggestions.forEach(song => {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = 'surface-subtle flex items-center gap-2.5 pl-1.5 pr-3 py-1.5 rounded-full text-left flex-shrink-0 group hover:border-indigo-500/40';
-            chip.innerHTML = `
-                <img src="${safeThumbUrl(song.id)}" alt="" class="w-7 h-7 rounded-full object-cover shadow-sm flex-shrink-0">
-                <div class="min-w-0 max-w-[160px]">
-                    <div class="text-xs font-semibold text-main truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(song.title)}</div>
-                </div>
-                <span class="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center text-xs font-bold group-hover:bg-indigo-600 group-hover:text-white transition">+</span>
-            `;
-
-            chip.onclick = () => {
-                window.roomSocket.addTrack(song);
-                showToast(`Đã thêm: ${song.title}`, 'success');
-            };
-
-            container.appendChild(chip);
-        });
+        // Only render defaults if we haven't already loaded related songs for an active track
+        if (!relatedSuggestionsState.currentItems) {
+            renderQuickSuggestionChips(suggestions, false);
+        }
     } catch (e) {
         console.error('Error fetching suggestions:', e);
     }
 }
+
+// =============================================================================
+// SYNCED LYRICS ENGINE (KARAOKE-STYLE REALTIME HIGHLIGHT & SEEK ON CLICK)
+// =============================================================================
+const lyricsState = {
+    cache: new Map(), // videoId -> { ts, data }
+    lastVideoId: null,
+    lines: [],        // [{ time, text }]
+    plainLines: [],
+    synced: false,
+    activeIndex: -1,
+    offsetSec: 0,
+    abortController: null,
+    userScrollPauseUntil: 0,
+    controlsBound: false,
+};
+
+function updateLyricsOffsetUI() {
+    const valEl = document.getElementById('lyrics-offset-value');
+    if (valEl) {
+        const v = lyricsState.offsetSec;
+        valEl.textContent = v === 0 ? '0s' : `${v > 0 ? '+' : ''}${v.toFixed(1)}s`;
+    }
+}
+
+function initLyricsControls() {
+    if (lyricsState.controlsBound) return;
+    lyricsState.controlsBound = true;
+
+    const viewport = document.getElementById('lyrics-lines-container');
+    if (viewport) {
+        const pauseAutoScroll = () => {
+            lyricsState.userScrollPauseUntil = Date.now() + 4000;
+        };
+        viewport.addEventListener('wheel', pauseAutoScroll, { passive: true });
+        viewport.addEventListener('touchstart', pauseAutoScroll, { passive: true });
+    }
+
+    document.getElementById('btn-lyrics-offset-minus')?.addEventListener('click', () => {
+        lyricsState.offsetSec = Math.max(-15, Math.round((lyricsState.offsetSec - 0.5) * 10) / 10);
+        updateLyricsOffsetUI();
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+    });
+
+    document.getElementById('btn-lyrics-offset-plus')?.addEventListener('click', () => {
+        lyricsState.offsetSec = Math.min(15, Math.round((lyricsState.offsetSec + 0.5) * 10) / 10);
+        updateLyricsOffsetUI();
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+    });
+
+    document.getElementById('lyrics-offset-value')?.addEventListener('click', () => {
+        lyricsState.offsetSec = 0;
+        updateLyricsOffsetUI();
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+    });
+}
+
+function resetLyricsState() {
+    if (lyricsState.abortController) {
+        lyricsState.abortController.abort();
+        lyricsState.abortController = null;
+    }
+    lyricsState.lastVideoId = null;
+    lyricsState.lines = [];
+    lyricsState.plainLines = [];
+    lyricsState.synced = false;
+    lyricsState.activeIndex = -1;
+    lyricsState.offsetSec = 0;
+    updateLyricsOffsetUI();
+
+    const badge = document.getElementById('lyrics-sync-badge');
+    const offsetCtrl = document.getElementById('lyrics-offset-controls');
+    const container = document.getElementById('lyrics-lines-container');
+    if (badge) badge.textContent = 'Chờ nhạc';
+    if (offsetCtrl) offsetCtrl.classList.add('hidden');
+    if (container) {
+        container.innerHTML = `
+            <div class="h-full flex flex-col items-center justify-center text-center px-4 text-white/65">
+                <span class="text-2xl mb-2">🎤</span>
+                <p class="text-xs sm:text-sm font-semibold text-white/85">Chưa có bài hát nào đang phát</p>
+                <p class="text-[11px] text-white/60 mt-1">Thêm một bài hát để lời bài hát tự động chạy và highlight theo nhạc!</p>
+            </div>
+        `;
+    }
+}
+
+function renderLyricsData(data) {
+    const container = document.getElementById('lyrics-lines-container');
+    const badge = document.getElementById('lyrics-sync-badge');
+    const offsetCtrl = document.getElementById('lyrics-offset-controls');
+    if (!container) return;
+
+    lyricsState.activeIndex = -1;
+    lyricsState.lines = (data && data.synced && Array.isArray(data.lines)) ? data.lines : [];
+    lyricsState.plainLines = (data && Array.isArray(data.plain_lines)) ? data.plain_lines : [];
+    lyricsState.synced = lyricsState.lines.length > 0;
+
+    if (lyricsState.synced) {
+        if (badge) {
+            badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/35 text-[10px] font-bold text-emerald-200';
+            badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đồng bộ theo nhạc`;
+        }
+        if (offsetCtrl) offsetCtrl.classList.remove('hidden');
+
+        container.innerHTML = '';
+        lyricsState.lines.forEach((line, idx) => {
+            const p = document.createElement('div');
+            p.className = 'lyric-line synced-clickable';
+            p.dataset.index = String(idx);
+            p.dataset.time = String(line.time);
+            p.textContent = line.text;
+            p.title = `Bấm để tua đến ${window.syncPlayer ? window.syncPlayer.formatTime(line.time) : ''}`;
+            p.onclick = () => {
+                const targetTime = Math.max(0, line.time - lyricsState.offsetSec);
+                window.syncPlayer.seekTo(targetTime);
+                window.roomSocket.controlPlayback('seek', targetTime);
+                lyricsState.userScrollPauseUntil = 0;
+                window.updateLyricsHighlight(targetTime, true);
+            };
+            container.appendChild(p);
+        });
+        container.scrollTop = 0;
+        if (window.syncPlayer) {
+            window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+        }
+        return;
+    }
+
+    if (offsetCtrl) offsetCtrl.classList.add('hidden');
+
+    if (lyricsState.plainLines.length > 0) {
+        if (badge) {
+            badge.className = 'inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-[10px] font-bold text-indigo-200';
+            badge.textContent = 'Lời đầy đủ';
+        }
+        container.innerHTML = '';
+        lyricsState.plainLines.forEach(lineText => {
+            const p = document.createElement('div');
+            p.className = 'lyric-line text-white/85';
+            p.textContent = lineText;
+            container.appendChild(p);
+        });
+        container.scrollTop = 0;
+        return;
+    }
+
+    if (badge) {
+        badge.className = 'inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-bold text-white/70';
+        badge.textContent = 'Chưa có lời';
+    }
+    container.innerHTML = `
+        <div class="h-full flex flex-col items-center justify-center text-center px-6 text-white/65">
+            <span class="text-2xl mb-2">🎼</span>
+            <p class="text-xs sm:text-sm font-semibold text-white/85">Chưa tìm thấy lời bài hát cho bản này</p>
+            <p class="text-[11px] text-white/60 mt-1">Một số bản nhạc không lời, remix hoặc mashup dài có thể chưa có dữ liệu lyric đồng bộ.</p>
+        </div>
+    `;
+}
+
+async function loadLyricsForTrack(track) {
+    const vid = track && track.id ? track.id : null;
+    if (!vid) {
+        resetLyricsState();
+        return;
+    }
+
+    if (lyricsState.lastVideoId === vid && (lyricsState.lines.length > 0 || lyricsState.plainLines.length > 0)) {
+        if (window.syncPlayer && window.syncPlayer.mode === 'lyrics') {
+            window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+        }
+        return;
+    }
+
+    lyricsState.lastVideoId = vid;
+    lyricsState.offsetSec = 0;
+    updateLyricsOffsetUI();
+
+    const cached = lyricsState.cache.get(vid);
+    if (cached) {
+        if (lyricsState.abortController) lyricsState.abortController.abort();
+        renderLyricsData(cached);
+        return;
+    }
+
+    if (lyricsState.abortController) lyricsState.abortController.abort();
+    const controller = new AbortController();
+    lyricsState.abortController = controller;
+
+    const badge = document.getElementById('lyrics-sync-badge');
+    const container = document.getElementById('lyrics-lines-container');
+    if (badge) {
+        badge.className = 'inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-bold text-indigo-200';
+        badge.textContent = 'Đang tìm lời...';
+    }
+    if (container) {
+        container.innerHTML = `
+            <div class="space-y-3 px-4 py-4">
+                <div class="h-4 w-3/4 rounded-lg bg-white/10 animate-pulse"></div>
+                <div class="h-4 w-2/3 rounded-lg bg-white/15 animate-pulse"></div>
+                <div class="h-4 w-4/5 rounded-lg bg-white/10 animate-pulse"></div>
+                <div class="h-4 w-1/2 rounded-lg bg-white/10 animate-pulse"></div>
+            </div>
+        `;
+    }
+
+    try {
+        const params = new URLSearchParams({
+            title: track.title || '',
+            author: track.author || '',
+            duration: String(parseInt(track.duration, 10) || 0),
+            video_id: vid,
+        });
+        const res = await fetch(`/api/lyrics?${params.toString()}`, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+
+        if (lyricsState.cache.size >= 60) {
+            const oldestKey = lyricsState.cache.keys().next().value;
+            lyricsState.cache.delete(oldestKey);
+        }
+        lyricsState.cache.set(vid, data);
+        renderLyricsData(data);
+    } catch (err) {
+        if (err.name === 'AbortError') return;
+        renderLyricsData({ found: false, synced: false, lines: [], plain_lines: [] });
+    }
+}
+window.loadLyricsForTrack = loadLyricsForTrack;
+
+function updateLyricsHighlight(currentTime, forceScroll = false) {
+    if (!lyricsState.synced || lyricsState.lines.length === 0) return;
+
+    const adjustedTime = Number(currentTime || 0) + lyricsState.offsetSec;
+    const lines = lyricsState.lines;
+
+    // Find the last line whose timestamp <= adjustedTime
+    let nextIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].time <= adjustedTime + 0.15) {
+            nextIdx = i;
+        } else {
+            break;
+        }
+    }
+
+    if (nextIdx === lyricsState.activeIndex && !forceScroll) {
+        return;
+    }
+
+    const prevIdx = lyricsState.activeIndex;
+    lyricsState.activeIndex = nextIdx;
+
+    const container = document.getElementById('lyrics-lines-container');
+    if (!container) return;
+
+    const children = container.children;
+    for (let i = 0; i < children.length; i++) {
+        const el = children[i];
+        const isActive = i === nextIdx;
+        const isPast = nextIdx >= 0 && i < nextIdx;
+        el.classList.toggle('active', isActive);
+        el.classList.toggle('past', isPast);
+    }
+
+    if (nextIdx >= 0 && children[nextIdx] && (forceScroll || nextIdx !== prevIdx)) {
+        if (forceScroll || Date.now() >= lyricsState.userScrollPauseUntil) {
+            const activeEl = children[nextIdx];
+            const targetScroll = activeEl.offsetTop - (container.clientHeight / 2) + (activeEl.clientHeight / 2);
+            container.scrollTo({
+                top: Math.max(0, targetScroll),
+                behavior: forceScroll ? 'auto' : 'smooth',
+            });
+        }
+    }
+}
+window.updateLyricsHighlight = updateLyricsHighlight;
 
 function escapeHtml(str) {
     if (!str) return '';

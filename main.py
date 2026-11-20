@@ -23,13 +23,21 @@ load_dotenv()
 from services.cache import TTLCache
 from services.database import DatabaseManager
 from services.ddos import DDoSGuard
-from services.gifs import get_curated_gifs, get_gif_cache_stats, search_gifs
+from services.gifs import (
+    get_curated_gifs,
+    get_curated_stickers,
+    get_gif_cache_stats,
+    get_sticker_cache_stats,
+    search_gifs,
+    search_stickers,
+)
 from services.keep_alive import (
     get_keep_alive_status,
     keep_alive_targets,
     keep_alive_url,
     start_keep_alive,
 )
+from services.lyrics import get_lyrics_cache_stats, get_synced_lyrics
 from services.security import (
     Session,
     SessionManager,
@@ -48,6 +56,7 @@ from services.security import (
 )
 from services.youtube import (
     extract_video_id,
+    get_related_videos,
     get_video_info,
     get_youtube_cache_stats,
     search_youtube,
@@ -72,6 +81,7 @@ session_manager = SessionManager(ttl_sec=86400, max_sessions=10_000)
 rate_limiter = SlidingWindowRateLimiter()
 ddos_guard = DDoSGuard()
 public_rooms_cache: TTLCache[List[Dict]] = TTLCache("public_rooms", max_size=4, default_ttl=3.0)
+room_suggestions_cache: TTLCache[Dict] = TTLCache("room_suggestions", max_size=100, default_ttl=60.0)
 db = DatabaseManager()
 db.init()
 
@@ -667,7 +677,10 @@ async def health_check():
         "cache": {
             **get_youtube_cache_stats(),
             "gif_search": get_gif_cache_stats(),
+            "sticker_search": get_sticker_cache_stats(),
+            "lyrics": get_lyrics_cache_stats(),
             "public_rooms": public_rooms_cache.stats(),
+            "room_suggestions": room_suggestions_cache.stats(),
             "chat_media": {
                 "items": len(chat_media_store),
                 "max_items": MAX_MEDIA_ITEMS,
@@ -851,6 +864,27 @@ async def api_video_info(request: Request, url: str = Query(..., min_length=1, m
     return JSONResponse({"video": info}, headers={"Cache-Control": "public, max-age=600"})
 
 
+@app.get("/api/youtube/related/{video_id}")
+async def api_youtube_related(
+    video_id: str,
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=15),
+):
+    """Fetch YouTube Mix / related songs for the currently playing track."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"yt_related:{ip}", limit=45, window_sec=60)
+
+    clean_vid = extract_video_id(video_id)
+    if not clean_vid:
+        raise HTTPException(status_code=400, detail="Mã video YouTube không hợp lệ")
+
+    items = await get_related_videos(clean_vid, limit=limit)
+    return JSONResponse(
+        {"video_id": clean_vid, "suggestions": items},
+        headers={"Cache-Control": "public, max-age=600"},
+    )
+
+
 @app.get("/api/youtube/audio/{video_id}")
 async def api_audio_stream(video_id: str, request: Request):
     """Stream pure YouTube audio with HTTP Range support (for Radio fallback / embed-restricted tracks)."""
@@ -908,56 +942,240 @@ async def api_audio_stream(video_id: str, request: Request):
     )
 
 
+DEFAULT_CURATED_SUGGESTIONS: List[Dict] = [
+    {
+        "id": "FN7ALfpGxiI",
+        "title": "NƠI NÀY CÓ ANH | SƠN TÙNG M-TP",
+        "author": "Sơn Tùng M-TP Official",
+        "thumbnail": "https://i.ytimg.com/vi/FN7ALfpGxiI/hqdefault.jpg",
+        "duration": 278,
+        "duration_str": "04:38",
+        "tag": "V-Pop",
+    },
+    {
+        "id": "AmduqflT79M",
+        "title": "Yêu Một Người Có Lẽ - Lou Hoàng - Miu Lê",
+        "author": "Miu Lê Official",
+        "thumbnail": "https://i.ytimg.com/vi/AmduqflT79M/hqdefault.jpg",
+        "duration": 265,
+        "duration_str": "04:25",
+        "tag": "V-Pop R&B",
+    },
+    {
+        "id": "_E-7A81Ac8U",
+        "title": "Cause I Love You - Noo Phước Thịnh",
+        "author": "Noo Phước Thịnh",
+        "thumbnail": "https://i.ytimg.com/vi/_E-7A81Ac8U/hqdefault.jpg",
+        "duration": 374,
+        "duration_str": "06:14",
+        "tag": "Dance Pop",
+    },
+    {
+        "id": "m7Wya6Z-QdM",
+        "title": "Từng Là, Giữa Đại Lộ Đông Tây, Thu Cuối - Lofi Chill Nhẹ Nhàng",
+        "author": "Soul Tracks",
+        "thumbnail": "https://i.ytimg.com/vi/m7Wya6Z-QdM/hqdefault.jpg",
+        "duration": 5554,
+        "duration_str": "1:32:34",
+        "tag": "Lofi Chill",
+    },
+    {
+        "id": "JGwWNGJdvx8",
+        "title": "Ed Sheeran - Shape of You (Official Music Video)",
+        "author": "Ed Sheeran",
+        "thumbnail": "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg",
+        "duration": 264,
+        "duration_str": "04:24",
+        "tag": "UK Pop",
+    },
+    {
+        "id": "Pkh8UtuejGw",
+        "title": "Shawn Mendes, Camila Cabello - Señorita",
+        "author": "Shawn Mendes",
+        "thumbnail": "https://i.ytimg.com/vi/Pkh8UtuejGw/hqdefault.jpg",
+        "duration": 206,
+        "duration_str": "03:26",
+        "tag": "Pop Duet",
+    },
+    {
+        "id": "papuvlVeZg8",
+        "title": "Clean Bandit - Rockabye (feat. Sean Paul & Anne-Marie)",
+        "author": "Clean Bandit",
+        "thumbnail": "https://i.ytimg.com/vi/papuvlVeZg8/hqdefault.jpg",
+        "duration": 254,
+        "duration_str": "04:14",
+        "tag": "Electronic",
+    },
+    {
+        "id": "3AtDnEC4zak",
+        "title": "Charlie Puth - We Don't Talk Anymore (feat. Selena Gomez)",
+        "author": "Charlie Puth",
+        "thumbnail": "https://i.ytimg.com/vi/3AtDnEC4zak/hqdefault.jpg",
+        "duration": 230,
+        "duration_str": "03:50",
+        "tag": "Pop",
+    },
+    {
+        "id": "kJQP7kiw5Fk",
+        "title": "Luis Fonsi - Despacito ft. Daddy Yankee",
+        "author": "Luis Fonsi",
+        "thumbnail": "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg",
+        "duration": 282,
+        "duration_str": "04:42",
+        "tag": "Latin Pop",
+    },
+    {
+        "id": "6EEW-9NDM5k",
+        "title": "Akon - Lonely (Official Music Video)",
+        "author": "Akon",
+        "thumbnail": "https://i.ytimg.com/vi/6EEW-9NDM5k/hqdefault.jpg",
+        "duration": 265,
+        "duration_str": "04:25",
+        "tag": "Classic R&B",
+    },
+]
+
+
 @app.get("/api/suggestions")
 async def get_suggestions():
-    suggestions = [
-        {
-            "id": "FN7ALfpGxiI",
-            "title": "NƠI NÀY CÓ ANH | SƠN TÙNG M-TP",
-            "author": "Sơn Tùng M-TP Official",
-            "thumbnail": "https://i.ytimg.com/vi/FN7ALfpGxiI/hqdefault.jpg",
-            "duration": 278,
-            "duration_str": "04:38",
-            "tag": "V-Pop Hit",
-        },
-        {
-            "id": "SlQR9iu09bQ",
-            "title": "COME MY WAY | SƠN TÙNG M-TP x TYGA",
-            "author": "Sơn Tùng M-TP Official",
-            "thumbnail": "https://i.ytimg.com/vi/SlQR9iu09bQ/hqdefault.jpg",
-            "duration": 235,
-            "duration_str": "03:55",
-            "tag": "Trending",
-        },
-        {
-            "id": "m7Wya6Z-QdM",
-            "title": "Từng Là, Giữa Đại Lộ Đông Tây, Thu Cuối - Lofi Chill Nhẹ Nhàng",
-            "author": "Soul Tracks",
-            "thumbnail": "https://i.ytimg.com/vi/m7Wya6Z-QdM/hqdefault.jpg",
-            "duration": 5554,
-            "duration_str": "1:32:34",
-            "tag": "Lofi Chill",
-        },
-        {
-            "id": "knW7-x7Y7RE",
-            "title": "HÃY TRAO CHO ANH ft. Snoop Dogg | SƠN TÙNG M-TP",
-            "author": "Sơn Tùng M-TP Official",
-            "thumbnail": "https://i.ytimg.com/vi/knW7-x7Y7RE/hqdefault.jpg",
-            "duration": 263,
-            "duration_str": "04:23",
-            "tag": "Hit MV",
-        },
-        {
-            "id": "kJQP7kiw5Fk",
-            "title": "Luis Fonsi - Despacito ft. Daddy Yankee",
-            "author": "Luis Fonsi",
-            "thumbnail": "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg",
-            "duration": 282,
-            "duration_str": "04:42",
-            "tag": "Latin Pop",
-        },
+    return JSONResponse(
+        {"suggestions": DEFAULT_CURATED_SUGGESTIONS},
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/rooms/{room_id}/suggestions")
+async def get_room_personalized_suggestions(
+    room_id: str,
+    request: Request,
+    limit: int = Query(default=10, ge=4, le=15),
+    invite: Optional[str] = Query(default=None),
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """Build diverse quick suggestions tailored to the room's listening history (max 2 per artist)."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"room_sug:{ip}", limit=40, window_sec=60)
+
+    clean_id = room_id.strip().lower()
+    room = rooms.get(clean_id)
+    if not room:
+        return JSONResponse(
+            {"mode": "curated", "suggestions": DEFAULT_CURATED_SUGGESTIONS[:limit]},
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+
+    # Protect private room history from unauthorized callers (IDOR-safe)
+    if room.is_private:
+        sess = resolve_session(x_session_token)
+        uid = sess.user_id if sess else None
+        if not room.is_authorized(uid, invite):
+            return JSONResponse(
+                {"mode": "curated", "suggestions": DEFAULT_CURATED_SUGGESTIONS[:limit]},
+                headers={"Cache-Control": "no-store"},
+            )
+
+    # Gather diverse seed tracks from listening history + current track + queue
+    raw_pool: List[Track] = []
+    if room.current_track:
+        raw_pool.append(room.current_track)
+    raw_pool.extend(reversed(room.history[-15:]))
+    raw_pool.extend(room.queue[:5])
+
+    seeds: List[Track] = []
+    seen_seed_ids: Set[str] = set()
+    seen_seed_authors: Set[str] = set()
+
+    # Pass 1: pick up to 3 seeds with DISTINCT artists for maximum variety
+    for t in raw_pool:
+        if t.id in seen_seed_ids:
+            continue
+        author_key = (t.author or "").strip().lower()
+        if author_key and author_key in seen_seed_authors:
+            continue
+        seeds.append(t)
+        seen_seed_ids.add(t.id)
+        if author_key:
+            seen_seed_authors.add(author_key)
+        if len(seeds) >= 3:
+            break
+
+    # Pass 2: if room only listened to 1 artist so far, add a second distinct song seed
+    if len(seeds) < 2:
+        for t in raw_pool:
+            if t.id not in seen_seed_ids:
+                seeds.append(t)
+                seen_seed_ids.add(t.id)
+                if len(seeds) >= 2:
+                    break
+
+    if not seeds:
+        return JSONResponse(
+            {"mode": "curated", "suggestions": DEFAULT_CURATED_SUGGESTIONS[:limit]},
+            headers={"Cache-Control": "private, max-age=30"},
+        )
+
+    exclude_ids: Set[str] = set()
+    if room.current_track:
+        exclude_ids.add(room.current_track.id)
+    for t in room.queue:
+        exclude_ids.add(t.id)
+    recent_history_ids = {t.id for t in room.history[-6:]}
+
+    cache_key = f"{clean_id}:{'-'.join(s.id for s in seeds)}:{'-'.join(sorted(exclude_ids))}:{limit}"
+    cached = room_suggestions_cache.get(cache_key)
+    if cached is not None:
+        return JSONResponse(cached, headers={"Cache-Control": "private, max-age=30"})
+
+    related_lists = await asyncio.gather(
+        *(get_related_videos(s.id, limit=8) for s in seeds),
+        return_exceptions=True,
+    )
+    clean_lists: List[List[Dict]] = [
+        lst for lst in related_lists if isinstance(lst, list) and lst
     ]
-    return JSONResponse({"suggestions": suggestions}, headers={"Cache-Control": "public, max-age=300"})
+
+    merged: List[Dict] = []
+    seen_ids: Set[str] = set(exclude_ids)
+    author_counts: Dict[str, int] = {}
+
+    def _try_add(item: Dict, max_per_artist: int = 2, skip_recent_hist: bool = True) -> bool:
+        vid = item.get("id")
+        if not vid or vid in seen_ids:
+            return False
+        if skip_recent_hist and vid in recent_history_ids:
+            return False
+        a_key = (item.get("author") or "youtube").strip().lower()
+        if author_counts.get(a_key, 0) >= max_per_artist:
+            return False
+        seen_ids.add(vid)
+        author_counts[a_key] = author_counts.get(a_key, 0) + 1
+        merged.append(item)
+        return True
+
+    # Interleave round-robin across all diverse seeds so no single artist dominates!
+    max_len = max((len(lst) for lst in clean_lists), default=0)
+    for idx in range(max_len):
+        for lst in clean_lists:
+            if idx < len(lst):
+                _try_add(lst[idx], max_per_artist=2, skip_recent_hist=True)
+                if len(merged) >= limit:
+                    break
+        if len(merged) >= limit:
+            break
+
+    # Pad remaining slots with diverse curated multi-genre tracks (max 1 per artist)
+    if len(merged) < limit:
+        for item in DEFAULT_CURATED_SUGGESTIONS:
+            _try_add(item, max_per_artist=1, skip_recent_hist=False)
+            if len(merged) >= limit:
+                break
+
+    payload = {
+        "mode": "room_history" if clean_lists else "curated",
+        "suggestions": merged[:limit],
+    }
+    room_suggestions_cache.set(cache_key, payload)
+    return JSONResponse(payload, headers={"Cache-Control": "private, max-age=30"})
 
 
 @app.get("/api/gifs/search")
@@ -967,8 +1185,36 @@ async def api_search_gifs(request: Request, q: str = Query(default="", max_lengt
     require_rate_limit(f"gif_search:{ip}", limit=35, window_sec=60)
     if not q.strip():
         return JSONResponse({"gifs": get_curated_gifs()}, headers={"Cache-Control": "public, max-age=600"})
-    results = await search_gifs(q, limit=16)
+    results = await search_gifs(q, limit=24)
     return JSONResponse({"gifs": results}, headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/api/stickers/search")
+async def api_search_stickers(request: Request, q: str = Query(default="", max_length=80)):
+    """Search Giphy animated Stickers (or return instant curated Stickers when q is empty)."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"sticker_search:{ip}", limit=35, window_sec=60)
+    if not q.strip():
+        return JSONResponse({"stickers": get_curated_stickers()}, headers={"Cache-Control": "public, max-age=600"})
+    results = await search_stickers(q, limit=24)
+    return JSONResponse({"stickers": results}, headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/api/lyrics")
+async def api_get_lyrics(
+    request: Request,
+    title: str = Query(..., min_length=1, max_length=200),
+    author: str = Query(default="", max_length=120),
+    duration: int = Query(default=0, ge=0, le=86400),
+    video_id: str = Query(default="", max_length=20),
+):
+    """Fetch synced LRC (or plain) lyrics for the currently playing track."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"lyrics:{ip}", limit=45, window_sec=60)
+
+    clean_vid = extract_video_id(video_id) or ""
+    result = await get_synced_lyrics(title=title, author=author, duration=duration, video_id=clean_vid)
+    return JSONResponse(result, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.post("/api/chat/upload")
@@ -1197,12 +1443,12 @@ async def websocket_room_endpoint(
                 media_url = None
                 verified_media_type = None
 
-                if media_type == "gif":
+                if media_type in ("gif", "sticker"):
                     gid = sanitize_giphy_id(data.get("gif_id"))
                     if not gid:
-                        await websocket.send_json({"type": "error", "message": "Mã ảnh GIF không hợp lệ"})
+                        await websocket.send_json({"type": "error", "message": "Mã nhãn dán / ảnh GIF không hợp lệ"})
                         continue
-                    verified_media_type = "gif"
+                    verified_media_type = media_type
                     media_url = f"https://media.giphy.com/media/{gid}/giphy.gif"
                 elif media_type == "image":
                     mid = sanitize_media_id(data.get("media_id"))

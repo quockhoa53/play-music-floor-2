@@ -52,9 +52,11 @@ _http_client: Optional[httpx.AsyncClient] = None
 yt_search_cache: TTLCache[List[Dict[str, Any]]] = TTLCache("yt_search", max_size=300, default_ttl=900)
 yt_info_cache: TTLCache[Dict[str, Any]] = TTLCache("yt_info", max_size=500, default_ttl=3600)
 yt_audio_cache: TTLCache[Tuple[str, str]] = TTLCache("yt_audio", max_size=200, default_ttl=1800)
+yt_related_cache: TTLCache[List[Dict[str, Any]]] = TTLCache("yt_related", max_size=300, default_ttl=1800)
 
-# In-flight search deduplication: cache_key -> asyncio.Task
+# In-flight request deduplication: cache_key -> asyncio.Task
 _inflight_searches: Dict[str, asyncio.Task] = {}
+_inflight_related: Dict[str, asyncio.Task] = {}
 
 
 def get_youtube_cache_stats() -> Dict[str, Any]:
@@ -62,6 +64,7 @@ def get_youtube_cache_stats() -> Dict[str, Any]:
         "yt_search": yt_search_cache.stats(),
         "yt_info": yt_info_cache.stats(),
         "yt_audio": yt_audio_cache.stats(),
+        "yt_related": yt_related_cache.stats(),
     }
 
 
@@ -506,3 +509,152 @@ async def get_audio_stream_url(video_id: str) -> Optional[Tuple[str, str]]:
     except Exception as e:
         print(f"[audio stream extract error] {e}")
     return None
+
+
+def _extract_text_obj(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    if obj.get("simpleText"):
+        return str(obj["simpleText"]).strip()
+    if isinstance(obj.get("runs"), list):
+        return "".join(str(r.get("text", "")) for r in obj["runs"] if isinstance(r, dict)).strip()
+    if obj.get("content"):
+        return str(obj["content"]).strip()
+    return ""
+
+
+def _extract_related_from_next_json(data: Any, source_video_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Parse related tracks from YouTube Innertube /next response.
+
+    Prefers RD Mix playlist items (musically matched individual songs), then falls back
+    to standard Up-Next / related renderers for non-music videos.
+    """
+    mix_items: List[Dict[str, Any]] = []
+    fallback_items: List[Dict[str, Any]] = []
+    seen: set = {source_video_id}
+
+    def _add_item(target_list: List[Dict[str, Any]], vid: str, title: str, author: str, dur_str: str):
+        if not vid or len(vid) != 11 or vid in seen or not title:
+            return
+        seen.add(vid)
+        dur_sec = parse_duration_str(dur_str) if dur_str else 0
+        target_list.append({
+            "id": vid,
+            "title": title,
+            "author": author or "YouTube",
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            "duration": dur_sec,
+            "duration_str": dur_str or format_duration(dur_sec),
+        })
+
+    def _walk(obj: Any):
+        if isinstance(obj, dict):
+            # 1. RD Music Mix entries (best quality for music rooms!)
+            if "playlistPanelVideoRenderer" in obj and isinstance(obj["playlistPanelVideoRenderer"], dict):
+                v = obj["playlistPanelVideoRenderer"]
+                vid = v.get("videoId", "")
+                title = _extract_text_obj(v.get("title"))
+                author = _extract_text_obj(v.get("shortBylineText")) or _extract_text_obj(v.get("longBylineText"))
+                dur_str = _extract_text_obj(v.get("lengthText"))
+                _add_item(mix_items, vid, title, author, dur_str)
+
+            # 2. Classic related video renderers (fallback)
+            for key in ("compactVideoRenderer", "videoWithContextRenderer"):
+                if key in obj and isinstance(obj[key], dict):
+                    v = obj[key]
+                    vid = v.get("videoId", "")
+                    title = _extract_text_obj(v.get("title")) or _extract_text_obj(v.get("headline"))
+                    author = (
+                        _extract_text_obj(v.get("shortBylineText"))
+                        or _extract_text_obj(v.get("longBylineText"))
+                        or _extract_text_obj(v.get("ownerText"))
+                    )
+                    dur_str = _extract_text_obj(v.get("lengthText"))
+                    _add_item(fallback_items, vid, title, author, dur_str)
+
+            # 3. Newer lockupViewModel related cards (fallback)
+            if "lockupViewModel" in obj and isinstance(obj["lockupViewModel"], dict):
+                lm = obj["lockupViewModel"]
+                vid = str(lm.get("contentId") or "")
+                meta = lm.get("metadata", {}).get("lockupMetadataViewModel", {})
+                title = _extract_text_obj(meta.get("title"))
+                author = ""
+                rows = meta.get("metadata", {}).get("contentMetadataViewModel", {}).get("metadataRows", [])
+                if isinstance(rows, list) and rows:
+                    parts = rows[0].get("metadataParts", [])
+                    if isinstance(parts, list) and parts:
+                        author = _extract_text_obj(parts[0].get("text"))
+                _add_item(fallback_items, vid, title, author, "")
+
+            for val in obj.values():
+                _walk(val)
+        elif isinstance(obj, list):
+            for el in obj:
+                _walk(el)
+
+    _walk(data)
+    combined = mix_items + fallback_items
+    return combined[:limit]
+
+
+async def _fetch_related_innertube(video_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    client = _get_http_client()
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240726.00.00",
+                "hl": "vi",
+                "gl": "VN",
+            }
+        },
+        "videoId": video_id,
+        "playlistId": f"RD{video_id}",
+    }
+    try:
+        resp = await client.post(
+            "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+            json=payload,
+            headers=WEB_HEADERS,
+            timeout=6.0,
+        )
+        if resp.status_code == 200:
+            return _extract_related_from_next_json(resp.json(), video_id, limit=limit)
+    except Exception as e:
+        print(f"[youtube related fetch error] {e}")
+    return []
+
+
+async def get_related_videos(video_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Fetch musically-related YouTube tracks for a video ID (LRU+TTL cached & deduplicated)."""
+    clean_id = extract_video_id(video_id)
+    if not clean_id:
+        return []
+
+    cache_key = f"{clean_id}:{limit}"
+    cached = yt_related_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    existing = _inflight_related.get(cache_key)
+    if existing and not existing.done():
+        try:
+            return await existing
+        except Exception:
+            pass
+
+    task = asyncio.create_task(_fetch_related_innertube(clean_id, limit=limit))
+    _inflight_related[cache_key] = task
+    try:
+        items = await task
+    finally:
+        if _inflight_related.get(cache_key) is task:
+            _inflight_related.pop(cache_key, None)
+
+    if items:
+        yt_related_cache.set(cache_key, items)
+        for it in items:
+            vid = it.get("id")
+            if vid:
+                yt_info_cache.set(vid, it)
+    return items

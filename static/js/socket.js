@@ -172,6 +172,10 @@ class RoomSocket {
         this.send('chat', { media_type: 'gif', gif_id: gifId, text: caption });
     }
 
+    sendSticker(stickerId, caption = '') {
+        this.send('chat', { media_type: 'sticker', gif_id: stickerId, text: caption });
+    }
+
     sendImage(mediaId, caption = '') {
         this.send('chat', { media_type: 'image', media_id: mediaId, text: caption });
     }

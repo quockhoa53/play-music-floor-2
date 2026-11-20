@@ -129,12 +129,23 @@ def test_http_headers_ui_and_media_endpoints():
     assert "Floor 2" in r_index.text
     assert "radio-mode-deck" in r_index.text
     assert "btn-minimize-chat" in r_index.text
-    assert "emoji-picker-popover" in r_index.text
     assert "gif-picker-popover" in r_index.text
     assert "chat-image-file-input" in r_index.text
     # Majority skip vote button present; unilateral Host force-skip must NOT exist
     assert "btn-vote-skip" in r_index.text
     assert "btn-force-skip" not in r_index.text
+    # Standard top-right toast template, custom confirm modal & sticker picker (no old emoji picker)
+    assert 'id="toast-template"' in r_index.text
+    assert 'id="confirm-dialog-modal"' in r_index.text
+    assert 'id="sticker-picker-popover"' in r_index.text
+    assert 'id="emoji-picker-popover"' not in r_index.text
+    assert 'id="gif-picker-popover"' in r_index.text
+    assert 'id="lyrics-mode-deck"' in r_index.text
+    # Stage switcher order: Radio (default) -> Lời bài hát -> Video
+    idx_radio = r_index.text.index('id="btn-mode-radio"')
+    idx_lyrics = r_index.text.index('id="btn-mode-lyrics"')
+    idx_video = r_index.text.index('id="btn-mode-video"')
+    assert idx_radio < idx_lyrics < idx_video
 
     for asset in (
         "/static/css/style.css",
@@ -145,10 +156,14 @@ def test_http_headers_ui_and_media_endpoints():
     ):
         assert client.get(asset).status_code == 200
 
-    # Curated GIFs (offline, no query)
+    # Curated GIFs (>= 24) & Curated Stickers (>= 12) return instantly offline
     r_gifs = client.get("/api/gifs/search")
     assert r_gifs.status_code == 200
-    assert len(r_gifs.json().get("gifs", [])) >= 8
+    assert len(r_gifs.json().get("gifs", [])) >= 24
+
+    r_stickers = client.get("/api/stickers/search")
+    assert r_stickers.status_code == 200
+    assert len(r_stickers.json().get("stickers", [])) >= 12
 
     # Image upload security checks
     assert client.post("/api/chat/upload", content=TINY_PNG).status_code == 401
@@ -287,6 +302,13 @@ def test_websocket_auth_media_chat_access_control_and_ratelimit():
         assert gif_msg["type"] == "chat"
         assert gif_msg["message"]["media_type"] == "gif"
         assert gif_msg["message"]["media_url"] == "https://media.giphy.com/media/GK7dGndK4kyOozR9Xk/giphy.gif"
+
+        # Send Animated Sticker chat
+        ws.send_json({"action": "chat", "media_type": "sticker", "gif_id": "nBRm2zMTYALaREiLcJ"})
+        st_msg = ws.receive_json()
+        assert st_msg["type"] == "chat"
+        assert st_msg["message"]["media_type"] == "sticker"
+        assert st_msg["message"]["media_url"] == "https://media.giphy.com/media/nBRm2zMTYALaREiLcJ/giphy.gif"
 
         # Send Image chat with caption
         ws.send_json({"action": "chat", "media_type": "image", "media_id": host_media_id, "text": "Ảnh test"})
@@ -496,7 +518,7 @@ def test_ttl_cache_and_http_cache_headers():
     client = TestClient(app)
     health = client.get("/api/health").json()
     assert "cache" in health
-    for key in ("yt_search", "yt_info", "yt_audio", "gif_search", "public_rooms", "chat_media"):
+    for key in ("yt_search", "yt_info", "yt_audio", "yt_related", "gif_search", "sticker_search", "lyrics", "public_rooms", "room_suggestions", "chat_media"):
         assert key in health["cache"], f"Missing cache metric: {key}"
 
     sug = client.get("/api/suggestions")
@@ -835,6 +857,183 @@ def test_skip_vote_majority_and_anti_sybil():
     print("[OK] Fair majority skip vote (>=50%), no Host override & Anti-Sybil")
 
 
+def test_related_videos_parser_and_endpoint():
+    from services.youtube import _extract_related_from_next_json, yt_related_cache
+
+    mock_next_json = {
+        "contents": {
+            "twoColumnWatchNextResults": {
+                "playlist": {
+                    "playlist": {
+                        "contents": [
+                            {
+                                "playlistPanelVideoRenderer": {
+                                    "videoId": "FN7ALfpGxiI",  # source track — must be excluded
+                                    "title": {"simpleText": "Source Song"},
+                                    "shortBylineText": {"runs": [{"text": "Artist"}]},
+                                    "lengthText": {"simpleText": "4:38"},
+                                }
+                            },
+                            {
+                                "playlistPanelVideoRenderer": {
+                                    "videoId": "abPmZCZZrFA",
+                                    "title": {"simpleText": "Đừng Làm Trái Tim Anh Đau"},
+                                    "shortBylineText": {"runs": [{"text": "Sơn Tùng M-TP Official"}]},
+                                    "lengthText": {"simpleText": "5:26"},
+                                }
+                            },
+                            {
+                                "playlistPanelVideoRenderer": {
+                                    "videoId": "abPmZCZZrFA",  # duplicate — must be deduplicated
+                                    "title": {"simpleText": "Đừng Làm Trái Tim Anh Đau"},
+                                }
+                            },
+                        ]
+                    }
+                },
+                "secondaryResults": {
+                    "secondaryResults": {
+                        "results": [
+                            {
+                                "compactVideoRenderer": {
+                                    "videoId": "Llw9Q6akRo4",
+                                    "title": {"simpleText": "Lạc Trôi"},
+                                    "shortBylineText": {"runs": [{"text": "Sơn Tùng M-TP Official"}]},
+                                    "lengthText": {"simpleText": "4:33"},
+                                }
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    parsed = _extract_related_from_next_json(mock_next_json, "FN7ALfpGxiI", limit=5)
+    assert [x["id"] for x in parsed] == ["abPmZCZZrFA", "Llw9Q6akRo4"]
+    assert parsed[0]["duration"] == 326 and parsed[0]["duration_str"] == "5:26"
+    assert parsed[1]["duration"] == 273
+
+    # Pre-seed cache to test HTTP endpoint completely offline
+    yt_related_cache.set("FN7ALfpGxiI:10", parsed)
+    client = TestClient(app)
+
+    bad = client.get("/api/youtube/related/invalid_id")
+    assert bad.status_code == 400
+
+    ok = client.get("/api/youtube/related/FN7ALfpGxiI?limit=10")
+    assert ok.status_code == 200
+    assert "max-age=600" in ok.headers.get("cache-control", "")
+    body = ok.json()
+    assert body["video_id"] == "FN7ALfpGxiI"
+    assert [s["id"] for s in body["suggestions"]] == ["abPmZCZZrFA", "Llw9Q6akRo4"]
+
+    print("[OK] Related YouTube songs parser, cache & /api/youtube/related endpoint")
+
+
+def test_lyrics_parser_cleaner_and_endpoint():
+    from services.lyrics import clean_youtube_title_for_lyrics, lyrics_cache, parse_lrc_lyrics
+
+    # 1. Title cleaner handles V-Pop MV titles cleanly
+    t1, a1 = clean_youtube_title_for_lyrics(
+        "HÃY TRAO CHO ANH ft. Snoop Dogg | SƠN TÙNG M-TP | OFFICIAL MUSIC VIDEO",
+        "Sơn Tùng M-TP Official",
+    )
+    assert t1 == "HÃY TRAO CHO ANH"
+    assert a1 == "Sơn Tùng M-TP"
+
+    t2, a2 = clean_youtube_title_for_lyrics(
+        "Ed Sheeran - Shape of You (Official Music Video)",
+        "Ed Sheeran",
+    )
+    assert t2 == "Shape of You"
+    assert a2 == "Ed Sheeran"
+
+    # 2. LRC parser supports single & multi timestamps and sorts cleanly
+    sample_lrc = """
+    [ar:Sơn Tùng M-TP]
+    [ti:Nơi Này Có Anh]
+    [00:26.31] Em là ai tựa như ánh nắng ban mai
+    [00:21.26] Em là ai từ đâu bước đến nơi đây
+    [00:31.50][01:45.20] Ngắm em thật lâu, con tim anh yếu mềm
+    """
+    parsed = parse_lrc_lyrics(sample_lrc)
+    assert len(parsed) == 4
+    assert [p["time"] for p in parsed] == [21.26, 26.31, 31.5, 105.2]
+    assert parsed[0]["text"] == "Em là ai từ đâu bước đến nơi đây"
+    assert parsed[3]["text"] == "Ngắm em thật lâu, con tim anh yếu mềm"
+
+    # 3. Cached /api/lyrics endpoint check (offline)
+    lyrics_cache.set(
+        "FN7ALfpGxiI",
+        {"found": True, "synced": True, "lines": parsed, "plain_lines": [], "source": "LRCLIB"},
+    )
+    client = TestClient(app)
+    r = client.get("/api/lyrics", params={"title": "Nơi Này Có Anh", "author": "Sơn Tùng M-TP", "video_id": "FN7ALfpGxiI"})
+    assert r.status_code == 200
+    assert "max-age=3600" in r.headers.get("cache-control", "")
+    body = r.json()
+    assert body["found"] is True and body["synced"] is True and len(body["lines"]) == 4
+
+    print("[OK] Synced Lyrics LRC parser, title cleaner, cache & /api/lyrics endpoint")
+
+
+def test_diverse_room_history_suggestions():
+    from services.youtube import yt_related_cache
+
+    client = TestClient(app)
+    rate_limiter._buckets.clear()
+    ddos_guard.reset()
+
+    # 1. Default /api/suggestions must have 10 diverse artists (no single artist dominating)
+    r_def = client.get("/api/suggestions")
+    assert r_def.status_code == 200
+    def_items = r_def.json()["suggestions"]
+    assert len(def_items) == 10
+    unique_authors = {it["author"].lower() for it in def_items}
+    assert len(unique_authors) == 10
+
+    # 2. Room history suggestions interleave diverse seeds & enforce max 2 per artist
+    tok, uid = _new_session(client)
+    cr = client.post("/api/rooms", headers={"X-Session-Token": tok}, json={"name": "History Sug Room"})
+    rid = cr.json()["room_id"]
+    room = rooms[rid]
+    room.current_track = Track("FN7ALfpGxiI", "Nơi Này Có Anh", "Sơn Tùng M-TP", 278, "04:38", uid, "U1")
+    room.history = [
+        Track("JGwWNGJdvx8", "Shape of You", "Ed Sheeran", 264, "04:24", uid, "U1"),
+        Track("AmduqflT79M", "Yêu Một Người Có Lẽ", "Miu Lê", 265, "04:25", uid, "U1"),
+    ]
+
+    # Pre-seed related caches offline (including 4 songs from same artist to verify max-2 cap)
+    yt_related_cache.set("FN7ALfpGxiI:8", [
+        {"id": "abPmZCZZrFA", "title": "ST 1", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
+        {"id": "Llw9Q6akRo4", "title": "ST 2", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
+        {"id": "xypzmu5mMPY", "title": "ST 3", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
+        {"id": "LCyo565N_5w", "title": "ST 4", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
+    ])
+    yt_related_cache.set("JGwWNGJdvx8:8", [
+        {"id": "Pkh8UtuejGw", "title": "Señorita", "author": "Shawn Mendes", "thumbnail": "", "duration": 206, "duration_str": "3:26"},
+        {"id": "papuvlVeZg8", "title": "Rockabye", "author": "Clean Bandit", "thumbnail": "", "duration": 254, "duration_str": "4:14"},
+    ])
+    yt_related_cache.set("AmduqflT79M:8", [
+        {"id": "_E-7A81Ac8U", "title": "Cause I Love You", "author": "Noo Phước Thịnh", "thumbnail": "", "duration": 374, "duration_str": "6:14"},
+        {"id": "3AtDnEC4zak", "title": "We Don't Talk Anymore", "author": "Charlie Puth", "thumbnail": "", "duration": 230, "duration_str": "3:50"},
+    ])
+
+    r_hist = client.get(f"/api/rooms/{rid}/suggestions?limit=10", headers={"X-Session-Token": tok})
+    assert r_hist.status_code == 200
+    body = r_hist.json()
+    assert body["mode"] == "room_history"
+    sug = body["suggestions"]
+    assert len(sug) == 10
+    # Verify Sơn Tùng M-TP is strictly capped at <= 2 and current_track is excluded
+    assert all(it["id"] != "FN7ALfpGxiI" for it in sug)
+    st_count = sum(1 for it in sug if "sơn tùng" in it["author"].lower())
+    assert st_count <= 2, f"Artist diversity cap failed: {st_count}"
+
+    print("[OK] Diverse room-history quick suggestions (interleaved & max 2/artist)")
+
+
 if __name__ == "__main__":
     try:
         rate_limiter._buckets.clear()
@@ -850,6 +1049,9 @@ if __name__ == "__main__":
         test_ddos_guard_protection()
         test_keep_alive_scheduler()
         test_skip_vote_majority_and_anti_sybil()
+        test_related_videos_parser_and_endpoint()
+        test_lyrics_parser_cleaner_and_endpoint()
+        test_diverse_room_history_suggestions()
         print("ALL TESTS PASSED!")
     finally:
         db.close()

@@ -68,7 +68,7 @@ class RoomChat {
 
     isSafeMediaUrl(url, mediaType) {
         if (typeof url !== 'string') return false;
-        if (mediaType === 'gif') {
+        if (mediaType === 'gif' || mediaType === 'sticker') {
             return /^https:\/\/media\.giphy\.com\/media\/[A-Za-z0-9]{8,28}\/giphy\.gif$/.test(url);
         }
         if (mediaType === 'image') {
@@ -105,13 +105,8 @@ class RoomChat {
         el.className = 'flex flex-col mb-3 animate-msg-in';
 
         if (msg.type === 'system') {
-            el.innerHTML = `
-                <div class="flex items-center justify-center my-0.5 min-w-0">
-                    <span class="chat-system-pill text-[11px] font-medium px-3 py-1 rounded-2xl text-center leading-snug max-w-[92%] break-words [overflow-wrap:anywhere]">
-                        ${this.escapeHtml(msg.text)}
-                    </span>
-                </div>
-            `;
+            el.className = 'flex flex-col mb-2 animate-msg-in';
+            el.innerHTML = this.renderSystemMessage(msg.text || '', timeStr);
         } else {
             const safeColor = /^#[0-9a-fA-F]{6}$/.test(msg.user_color || '') ? msg.user_color : '#4f46e5';
             const safeAvatar = this.escapeHtml(msg.user_avatar || '🎧');
@@ -124,16 +119,25 @@ class RoomChat {
 
             let contentHtml = '';
             if (hasValidMedia) {
-                const gifTag = msg.media_type === 'gif'
-                    ? `<span class="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/65 text-white text-[9px] font-extrabold tracking-wider">GIF</span>`
-                    : '';
-                contentHtml += `
-                    <div class="relative rounded-2xl overflow-hidden shadow-md border border-theme max-w-[230px] bg-black/10 cursor-zoom-in group js-chat-media-wrap">
-                        <img src="${msg.media_url}" alt="${msg.media_type === 'gif' ? 'GIF' : 'Hình ảnh'}" loading="lazy"
-                             class="js-chat-media-img block max-w-full max-h-56 object-contain rounded-2xl transition-transform duration-200 group-hover:scale-[1.02]">
-                        ${gifTag}
-                    </div>
-                `;
+                if (msg.media_type === 'sticker') {
+                    contentHtml += `
+                        <div class="relative p-1 max-w-[144px] cursor-zoom-in group js-chat-media-wrap">
+                            <img src="${msg.media_url}" alt="Nhãn dán" loading="lazy"
+                                 class="js-chat-media-img block w-32 h-32 object-contain drop-shadow-md transition-transform duration-200 group-hover:scale-105">
+                        </div>
+                    `;
+                } else {
+                    const gifTag = msg.media_type === 'gif'
+                        ? `<span class="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/65 text-white text-[9px] font-extrabold tracking-wider">GIF</span>`
+                        : '';
+                    contentHtml += `
+                        <div class="relative rounded-2xl overflow-hidden shadow-md border border-theme max-w-[230px] bg-black/10 cursor-zoom-in group js-chat-media-wrap">
+                            <img src="${msg.media_url}" alt="${msg.media_type === 'gif' ? 'GIF' : 'Hình ảnh'}" loading="lazy"
+                                 class="js-chat-media-img block max-w-full max-h-56 object-contain rounded-2xl transition-transform duration-200 group-hover:scale-[1.02]">
+                            ${gifTag}
+                        </div>
+                    `;
+                }
             }
 
             if (hasText) {
@@ -185,7 +189,12 @@ class RoomChat {
 
         this.container.appendChild(el);
 
-        if (!this.isUserScrolledUp || isHistory || isMe) {
+        // Keep chat DOM bounded (max 120 messages) for smooth long-session scrolling
+        while (this.container.children.length > 120) {
+            this.container.firstElementChild?.remove();
+        }
+
+        if (!isHistory && (!this.isUserScrolledUp || isMe)) {
             this.isUserScrolledUp = false;
             this.scrollToBottom();
         }
@@ -221,6 +230,101 @@ class RoomChat {
         }
     }
 
+    renderSystemMessage(rawText) {
+        const text = String(rawText || '').trim();
+        const esc = (s) => this.escapeHtml(s);
+        const nameSpan = (s) => `<span class="font-semibold text-main">${esc(s)}</span>`;
+        const cleanTitle = (s) => {
+            const stripped = String(s || '')
+                .replace(/\s*[\(\[][^\)\]]*(?:official|music\s*video|mv|4k|hd|lyric|audio)[^\)\]]*[\)\]]/gi, '')
+                .replace(/\s*\|\s*official\s*(?:music\s*video|mv|video)\s*/gi, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const finalTitle = stripped || s || '';
+            return finalTitle.length > 52 ? `${finalTitle.slice(0, 51)}…` : finalTitle;
+        };
+        const titleSpan = (s) => `<span class="text-sub">“${esc(cleanTitle(s))}”</span>`;
+
+        const pill = (icon, bodyHtml, extraCls = '') => `
+            <div class="flex items-center justify-center my-0.5 min-w-0">
+                <span class="sys-event-card ${extraCls} inline-flex items-center flex-wrap justify-center gap-1 text-[11px] px-2.5 py-0.5 rounded-full leading-snug max-w-[92%] text-center break-words [overflow-wrap:anywhere]">
+                    <span class="flex-shrink-0">${icon}</span>
+                    <span>${bodyHtml}</span>
+                </span>
+            </div>
+        `;
+
+        const plainLine = (icon, bodyHtml) => `
+            <div class="flex items-center justify-center my-0.5 px-3 min-w-0">
+                <p class="text-[11px] text-dim text-center leading-relaxed max-w-[94%] break-words [overflow-wrap:anywhere]">
+                    <span class="mr-1">${icon}</span>${bodyHtml}
+                </p>
+            </div>
+        `;
+
+        let m;
+
+        // 1. Vào phòng -> pill nền xanh lá gọn
+        if ((m = text.match(/^👋\s+(.+?)\s+đã vào phòng$/))) {
+            return pill('👋', `${nameSpan(m[1])} <span class="text-sub">đã vào phòng</span>`, 'sys-event-emerald');
+        }
+
+        // 2. Rời phòng -> pill nền xám gọn
+        if ((m = text.match(/^🏃\s+(.+?)\s+đã rời phòng(?:\.\s*👑\s+(.+?)\s+đã trở thành Chủ phòng mới)?$/))) {
+            if (m[2]) {
+                return pill('🏃', `${nameSpan(m[1])} <span class="text-sub">đã rời phòng • 👑</span> ${nameSpan(m[2])} <span class="text-sub">là Chủ phòng mới</span>`);
+            }
+            return pill('🏃', `${nameSpan(m[1])} <span class="text-sub">đã rời phòng</span>`);
+        }
+
+        // 3. Các thông báo khác -> không nền, căn giữa đồng nhất, chỉ in đậm tên
+        if ((m = text.match(/^➕\s+(.+?)\s+đã thêm vào hàng đợi\s+\((#\d+)\):\s+(.+)$/))) {
+            return plainLine('➕', `${nameSpan(m[1])} đã thêm ${titleSpan(m[3])} (${esc(m[2])})`);
+        }
+
+        if ((m = text.match(/^🎶\s+(.+?)\s+đã phát:\s+(.+)$/))) {
+            return plainLine('🎶', `${nameSpan(m[1])} đã phát ${titleSpan(m[2])}`);
+        }
+
+        if ((m = text.match(/^⚡\s+(.+?)\s+yêu cầu ưu tiên bài\s+"(.+?)"\s+\((\d+\/\d+\s+phiếu)\)/))) {
+            return plainLine('⚡', `${nameSpan(m[1])} xin ưu tiên ${titleSpan(m[2])} (${esc(m[3])})`);
+        }
+
+        if ((m = text.match(/^🚀\s+Đã đủ\s+(\d+\/\d+\s+phiếu)!\s+Bài\s+"(.+?)"\s+được ưu tiên lên phát kế tiếp\s+\(#1\)!?$/))) {
+            return plainLine('🚀', `Đủ ${esc(m[1])} • ${titleSpan(m[2])} lên #1 kế tiếp`);
+        }
+
+        if ((m = text.match(/^✖️\s+(.+?)\s+đã hủy yêu cầu ưu tiên bài\s+"(.+?)"$/))) {
+            return plainLine('✖️', `${nameSpan(m[1])} đã hủy ưu tiên ${titleSpan(m[2])}`);
+        }
+
+        if ((m = text.match(/^⏭️\s+(.+?)\s+đề xuất qua bài\s+"(.+?)"\s+\((\d+\/\d+\s+phiếu)\)/))) {
+            return plainLine('⏭️', `${nameSpan(m[1])} vote qua bài ${titleSpan(m[2])} (${esc(m[3])})`);
+        }
+
+        if ((m = text.match(/^⏭️\s+Đã đủ\s+(\d+\/\d+\s+phiếu)\s+bỏ qua!\s+Chuyển sang bài:\s+(.+)$/))) {
+            return plainLine('⏭️', `Đủ ${esc(m[1])} qua bài • Phát ${titleSpan(m[2])}`);
+        }
+
+        if ((m = text.match(/^⏭️\s+Đã đủ\s+(\d+\/\d+\s+phiếu)\s+bỏ qua bài\s+"(.+?)"\.\s+(.+)$/))) {
+            return plainLine('⏭️', `Đủ ${esc(m[1])} bỏ qua ${titleSpan(m[2])}`);
+        }
+
+        if ((m = text.match(/^⏭️\s+Đang phát bài tiếp theo:\s+(.+)$/))) {
+            return plainLine('⏭️', `Tiếp theo: ${titleSpan(m[1])}`);
+        }
+
+        if ((m = text.match(/^🗑️\s+(.+?)\s+đã xóa bài:\s+(.+)$/))) {
+            return plainLine('🗑️', `${nameSpan(m[1])} đã xóa ${titleSpan(m[2])}`);
+        }
+
+        if ((m = text.match(/^🎛️\s+Chế độ DJ đã\s+(BẬT|TẮT)\s*\((.+)\)$/))) {
+            return plainLine('🎛️', `Chế độ DJ: ${nameSpan(m[1])}`);
+        }
+
+        return plainLine('•', esc(text));
+    }
+
     formatTime(ts) {
         if (!ts) return '';
         const d = new Date(ts * 1000);
@@ -238,6 +342,12 @@ class RoomChat {
     }
 
     spawnFloatingEmoji(emoji) {
+        // Cap simultaneous floating particles at 12 to keep 60fps during rapid clicks
+        const existing = document.querySelectorAll('.floating-particle');
+        if (existing.length >= 12) {
+            existing[0]?.remove();
+        }
+
         const particle = document.createElement('div');
         particle.className = 'floating-particle';
         particle.textContent = emoji;
@@ -251,7 +361,7 @@ class RoomChat {
             if (particle.parentNode) {
                 particle.parentNode.removeChild(particle);
             }
-        }, 2700);
+        }, 2500);
     }
 }
 
