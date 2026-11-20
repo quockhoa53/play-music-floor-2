@@ -8,6 +8,7 @@ class RoomChat {
         this.audioCtx = null;
         this.isUserScrolledUp = false;
         this.unreadCount = 0;
+        this.typingEl = null;
     }
 
     init() {
@@ -108,11 +109,14 @@ class RoomChat {
             el.className = 'flex flex-col mb-2 animate-msg-in';
             el.innerHTML = this.renderSystemMessage(msg.text || '', timeStr);
         } else {
-            const safeColor = /^#[0-9a-fA-F]{6}$/.test(msg.user_color || '') ? msg.user_color : '#4f46e5';
-            const safeAvatar = this.escapeHtml(msg.user_avatar || '🎧');
-            const hostBadge = msg.is_host
-                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-bold flex-shrink-0">👑 Host</span>`
-                : '';
+            const isAi = !!(msg.is_ai || msg.user_id === 'ai_em_be_floor_2');
+            const safeColor = /^#[0-9a-fA-F]{6}$/.test(msg.user_color || '') ? msg.user_color : (isAi ? '#ec4899' : '#4f46e5');
+            const safeAvatar = this.escapeHtml(msg.user_avatar || (isAi ? '🎀' : '🎧'));
+            const hostBadge = isAi
+                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-600 dark:text-pink-300 border border-pink-500/30 text-[10px] font-extrabold flex-shrink-0">✨ AI</span>`
+                : (msg.is_host
+                    ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-bold flex-shrink-0">👑 Host</span>`
+                    : '');
 
             const hasValidMedia = msg.media_url && this.isSafeMediaUrl(msg.media_url, msg.media_type);
             const hasText = Boolean(msg.text && msg.text.trim());
@@ -145,11 +149,36 @@ class RoomChat {
                     <div class="${hasValidMedia ? 'mt-1.5 ' : ''}rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed max-w-full break-words [overflow-wrap:anywhere] shadow-sm ${
                         isMe
                             ? 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-br-sm'
-                            : 'chat-bubble-other rounded-bl-sm'
+                            : (isAi
+                                ? 'chat-bubble-other rounded-bl-sm ring-1 ring-pink-500/35 bg-gradient-to-br from-pink-500/10 via-violet-500/10 to-indigo-500/5'
+                                : 'chat-bubble-other rounded-bl-sm')
                     }">
-                        ${this.escapeHtml(msg.text)}
+                        ${this.formatMessageWithMentions(msg.text, isMe)}
                     </div>
                 `;
+            }
+
+            // Optional 1-click suggested tracks from "@Em bé floor 2"
+            if (isAi && Array.isArray(msg.suggested_tracks) && msg.suggested_tracks.length > 0) {
+                const tracksHtml = msg.suggested_tracks.slice(0, 3).map((t, idx) => {
+                    const safeVid = /^[a-zA-Z0-9_-]{11}$/.test(t.id || '') ? t.id : '';
+                    const thumb = safeVid ? `https://i.ytimg.com/vi/${safeVid}/hqdefault.jpg` : '';
+                    return `
+                        <div class="js-ai-chat-track surface-subtle flex items-center justify-between gap-2 p-1.5 rounded-xl border border-pink-500/25" data-track-idx="${idx}">
+                            <div class="flex items-center gap-2 min-w-0 flex-1">
+                                ${thumb ? `<img src="${thumb}" alt="" class="w-9 h-9 rounded-lg object-cover flex-shrink-0">` : ''}
+                                <div class="min-w-0 flex-1">
+                                    <div class="text-[11.5px] font-bold text-main truncate">${this.escapeHtml(t.title || '')}</div>
+                                    <div class="text-[10px] text-sub truncate">${this.escapeHtml(t.author || '')}</div>
+                                </div>
+                            </div>
+                            <button type="button" class="js-btn-add-ai-track px-2.5 py-1 rounded-lg btn-gradient text-[11px] font-bold flex-shrink-0" data-track-idx="${idx}">
+                                + Thêm
+                            </button>
+                        </div>
+                    `;
+                }).join('');
+                contentHtml += `<div class="mt-1.5 w-full space-y-1">${tracksHtml}</div>`;
             }
 
             el.innerHTML = `
@@ -158,7 +187,7 @@ class RoomChat {
                          style="background-color: ${safeColor}22; border: 1.5px solid ${safeColor}88">
                         ${safeAvatar}
                     </div>
-                    <div class="max-w-[78%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}">
+                    <div class="max-w-[82%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}">
                         <div class="flex items-center gap-1.5 mb-1 px-1 text-[11px] max-w-full">
                             <span class="font-semibold truncate" style="color: ${safeColor}">
                                 ${this.escapeHtml(msg.user_name || 'Khách')}
@@ -170,6 +199,22 @@ class RoomChat {
                     </div>
                 </div>
             `;
+
+            if (isAi && Array.isArray(msg.suggested_tracks) && msg.suggested_tracks.length > 0) {
+                el.querySelectorAll('.js-btn-add-ai-track').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const idx = parseInt(btn.getAttribute('data-track-idx') || '0', 10);
+                        const track = msg.suggested_tracks[idx];
+                        if (!track) return;
+                        if (typeof window.canAddTrackInCurrentRoom === 'function' && !window.canAddTrackInCurrentRoom()) {
+                            return;
+                        }
+                        window.roomSocket.addTrack(track);
+                        btn.textContent = '✓ Đã thêm';
+                        btn.className = 'js-btn-add-ai-track px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 text-[11px] font-bold flex-shrink-0';
+                    });
+                });
+            }
 
             // Bind lightbox zoom & scroll-on-load for images/GIFs
             const mediaImg = el.querySelector('.js-chat-media-img');
@@ -188,6 +233,9 @@ class RoomChat {
         }
 
         this.container.appendChild(el);
+        if (this.typingEl && this.typingEl.parentNode === this.container) {
+            this.container.appendChild(this.typingEl);
+        }
 
         // Keep chat DOM bounded (max 120 messages) for smooth long-session scrolling
         while (this.container.children.length > 120) {
@@ -224,9 +272,35 @@ class RoomChat {
     clear() {
         this.isUserScrolledUp = false;
         this.unreadCount = 0;
+        this.typingEl = null;
         this.updateUnreadBadges();
         if (this.container) {
             this.container.innerHTML = '';
+        }
+    }
+
+    setAiTyping(isTyping, botName = 'Em bé floor 2') {
+        if (!this.container) return;
+        if (!isTyping) {
+            if (this.typingEl && this.typingEl.parentNode) {
+                this.typingEl.remove();
+            }
+            this.typingEl = null;
+            return;
+        }
+        if (!this.typingEl) {
+            const el = document.createElement('div');
+            el.id = 'ai-typing-indicator';
+            el.className = 'flex items-center gap-2 px-2 py-1.5 text-xs text-pink-600 dark:text-pink-300 font-semibold animate-pulse';
+            el.innerHTML = `
+                <span class="w-6 h-6 rounded-full bg-pink-500/15 border border-pink-500/35 flex items-center justify-center text-xs">🎀</span>
+                <span>${this.escapeHtml(botName)} đang suy nghĩ...</span>
+            `;
+            this.typingEl = el;
+        }
+        this.container.appendChild(this.typingEl);
+        if (!this.isUserScrolledUp) {
+            this.scrollToBottom();
         }
     }
 
@@ -339,6 +413,35 @@ class RoomChat {
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#039;");
+    }
+
+    formatMessageWithMentions(rawText, isMe = false) {
+        const safe = this.escapeHtml(rawText || '');
+        if (!safe.includes('@')) return safe;
+
+        const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const users = (window.appState && window.appState.roomData && Array.isArray(window.appState.roomData.users))
+            ? window.appState.roomData.users
+            : [];
+        const memberPatterns = users
+            .map(u => this.escapeHtml((u && u.name) || '').trim())
+            .filter(Boolean)
+            .sort((a, b) => b.length - a.length)
+            .map(n => `@${escapeRegex(n)}`);
+
+        const aiPattern = `@(?:Em\\s+b(?:é|e)\\s+floor\\s+2|embefloor2)`;
+        const combined = new RegExp(`(${[aiPattern, ...memberPatterns].join('|')})`, 'gi');
+
+        return safe.replace(combined, (match) => {
+            const isAiTag = /^@(?:em\s+b(?:é|e)\s+floor\s+2|embefloor2)$/i.test(match);
+            if (isMe) {
+                return `<strong class="font-extrabold px-1.5 py-0.5 rounded-md bg-white/25 text-white">${match}</strong>`;
+            }
+            if (isAiTag) {
+                return `<strong class="font-extrabold px-1.5 py-0.5 rounded-md bg-pink-500/15 text-pink-600 dark:text-pink-300">${match}</strong>`;
+            }
+            return `<strong class="font-extrabold px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-600 dark:text-indigo-300">${match}</strong>`;
+        });
     }
 
     spawnFloatingEmoji(emoji) {

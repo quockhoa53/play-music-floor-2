@@ -41,6 +41,7 @@ class SyncPlayer {
         this.localDetached = false;
         this.isUserScrubbing = false;
         this.autoplayBlocked = false;
+        this.isDuckedForMc = false;
         this._autoplayCheckTimers = [];
         this._globalUnlockBound = false;
     }
@@ -195,6 +196,7 @@ class SyncPlayer {
             this.localPaused = false;
             this.setAutoplayBannerVisible(false);
             this.clearAutoplayTimers();
+            this._applyEffectiveVolume();
 
             const curTime = this.getRawPlayerTime();
             this._lastYtTime = curTime;
@@ -293,7 +295,7 @@ class SyncPlayer {
                 this.audioEl.currentTime = Math.min(targetTime, Math.max(0, this.audioEl.duration - 1));
             }
             this.audioEl.muted = this.isMuted;
-            this.audioEl.volume = this.volume / 100;
+            this._applyEffectiveVolume();
             this.audioEl.play().catch(() => {
                 this.autoplayBlocked = true;
                 this.setAutoplayBannerVisible(true);
@@ -309,7 +311,7 @@ class SyncPlayer {
             if (!this.isMuted && this.player.unMute) {
                 this.player.unMute();
             }
-            this.player.setVolume(this.volume);
+            this._applyEffectiveVolume();
             if (this.loadedVideoId !== this.currentTrack.id) {
                 this.loadedVideoId = this.currentTrack.id;
                 this.player.loadVideoById({
@@ -350,7 +352,7 @@ class SyncPlayer {
         const targetTime = this.getRoomLiveTime();
 
         this.audioEl.src = `/api/youtube/audio/${encodeURIComponent(videoId)}`;
-        this.audioEl.volume = this.volume / 100;
+        this._applyEffectiveVolume();
         this.audioEl.muted = this.isMuted;
 
         const onLoaded = () => {
@@ -569,14 +571,24 @@ class SyncPlayer {
         this.volume = Math.max(0, Math.min(100, parseInt(val, 10)));
         localStorage.setItem('floor2_volume', this.volume);
         this.updateVolumeSliderFill();
+        this._applyEffectiveVolume();
+    }
+
+    setMcDucking(active) {
+        this.isDuckedForMc = !!active;
+        this._applyEffectiveVolume();
+    }
+
+    _applyEffectiveVolume() {
+        const effVol = this.isDuckedForMc ? Math.max(6, Math.round(this.volume * 0.18)) : this.volume;
 
         if (this.audioEl) {
-            this.audioEl.volume = this.volume / 100;
+            this.audioEl.volume = effVol / 100;
             if (this.isMuted && this.volume > 0) this.audioEl.muted = false;
         }
 
         if (this.isReady && this.player && typeof this.player.setVolume === 'function') {
-            this.player.setVolume(this.volume);
+            this.player.setVolume(effVol);
             if (this.isMuted && this.volume > 0) {
                 this.player.unMute();
                 this.isMuted = false;

@@ -444,6 +444,34 @@ async def _fetch_lyrics_from_lrclib(title: str, author: str, duration: int) -> D
         except Exception as e:
             print(f"[lyrics fetch error] {e}")
 
+    # AI Smart Title Normalization Fallback (Nhóm 2B): when regex cleaning finds no synced lyrics
+    if not any((x.get("syncedLyrics") or "").strip() for x in candidates):
+        try:
+            from services.ai import normalize_track_for_lyrics
+
+            ai_norm = await normalize_track_for_lyrics(title, author)
+            if ai_norm:
+                ai_t, ai_a = ai_norm
+                ai_queries = []
+                if ai_t and ai_a:
+                    ai_queries.append(f"{ai_t} {ai_a}")
+                if ai_t and ai_t not in ai_queries:
+                    ai_queries.append(ai_t)
+                for aq in ai_queries:
+                    if aq in queries:
+                        continue
+                    resp = await client.get("https://lrclib.net/api/search", params={"q": aq})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, list) and data:
+                            candidates = data
+                            clean_title = ai_t or clean_title
+                            clean_author = ai_a or clean_author
+                            if any((x.get("syncedLyrics") or "").strip() for x in candidates):
+                                break
+        except Exception as e:
+            print(f"[lyrics ai norm fallback error] {e}")
+
     if not candidates:
         return {
             "found": False,

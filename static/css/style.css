@@ -432,6 +432,42 @@ input[type="range"].studio-range::-moz-range-thumb {
   border: 1px solid var(--border-subtle);
 }
 
+/* Live @Mention Highlight inside Chat Input & Chat Bubbles */
+#chat-text-input.has-mention-highlight {
+  color: transparent !important;
+  caret-color: var(--text-primary) !important;
+  background: transparent !important;
+}
+#chat-input-mirror {
+  pointer-events: none;
+  white-space: pre;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+.chat-input-mention-ai {
+  font-weight: inherit;
+  -webkit-text-stroke: 0.55px currentColor;
+  text-shadow: 0.25px 0 0 currentColor;
+  color: #db2777;
+  background: rgba(236, 72, 153, 0.16);
+  border-radius: 5px;
+  box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.16);
+}
+html.dark .chat-input-mention-ai {
+  color: #f472b6;
+  background: rgba(244, 114, 182, 0.2);
+  box-shadow: 0 0 0 2px rgba(244, 114, 182, 0.2);
+}
+.chat-input-mention-user {
+  font-weight: inherit;
+  -webkit-text-stroke: 0.55px currentColor;
+  text-shadow: 0.25px 0 0 currentColor;
+  color: var(--accent-primary);
+  background: var(--accent-soft);
+  border-radius: 5px;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
 /* Floating Emoji Reaction Particle (GPU-Only) */
 .floating-particle {
   position: fixed;

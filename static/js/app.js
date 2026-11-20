@@ -22,6 +22,7 @@ window.appState = {
     isVideoHidden: localStorage.getItem('floor2_video_hidden') === 'true',
     // On mobile (< 1024px), always start with chat sheet closed so the music stage is immediately visible
     isChatCollapsed: window.innerWidth < 1024 ? true : (localStorage.getItem('floor2_chat_collapsed') === 'true'),
+    mcEnabled: false,
     suggestions: [],
     pendingPrivateRoomId: null,
     pendingImageFile: null,
@@ -401,6 +402,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initLightbox();
     initRealtimeSearch();
     initQuickSuggestions();
+    initAiFeatures();
     loadPublicRooms();
 
     try {
@@ -783,6 +785,9 @@ async function joinRoom(roomId, inviteToken = null) {
 function leaveRoom() {
     window.roomSocket.disconnect();
     if (window.syncPlayer) window.syncPlayer.reset();
+    stopMcRadioSpeech();
+    document.getElementById('room-vibe-card')?.classList.add('hidden');
+    document.getElementById('ai-dj-modal')?.classList.add('hidden');
     window.appState.roomId = null;
     window.appState.inviteToken = null;
     window.appState.roomData = null;
@@ -1191,6 +1196,7 @@ function canAddTrackInCurrentRoom() {
     }
     return true;
 }
+window.canAddTrackInCurrentRoom = canAddTrackInCurrentRoom;
 
 function addTrackFromSearch(item, idx) {
     if (!canAddTrackInCurrentRoom()) return;
@@ -1256,6 +1262,12 @@ function initSocketEvents() {
         loadRelatedSuggestionsForTrack(window.appState.roomData.current_track, data.related_suggestions || null);
         loadLyricsForTrack(window.appState.roomData.current_track);
         loadRoomQuickSuggestions(window.appState.roomId);
+        if (parseFloat(data.current_time || 0) <= 5.0) {
+            mcRadioState.lastSpokenUid = null;
+            mcRadioState.fetchingUid = null;
+        }
+        triggerMcRadioIntroForTrack(window.appState.roomData.current_track);
+        refreshRoomVibeIfOpen();
 
         if (data.message) window.roomChat.addMessage(data.message);
     });
@@ -1356,6 +1368,35 @@ function initSocketEvents() {
         if (data.message) window.roomChat.addMessage(data.message);
     });
 
+    socket.on('mc_mode_changed', (data) => {
+        if (window.appState.roomData) {
+            window.appState.roomData.mc_enabled = !!data.mc_enabled;
+            window.appState.mcEnabled = !!data.mc_enabled;
+            updateMcToggleUI();
+            if (!data.mc_enabled) {
+                stopMcRadioSpeech();
+            } else if (window.appState.roomData.current_track) {
+                mcRadioState.lastSpokenUid = null;
+                triggerMcRadioIntroForTrack(window.appState.roomData.current_track);
+            }
+        }
+        if (data.message) window.roomChat.addMessage(data.message);
+    });
+
+    socket.on('auto_dj_changed', (data) => {
+        if (window.appState.roomData) {
+            window.appState.roomData.auto_dj = !!data.auto_dj;
+            updateAutoDjUI();
+        }
+        if (data.message) window.roomChat.addMessage(data.message);
+    });
+
+    socket.on('ai_typing', (data) => {
+        if (window.roomChat && typeof window.roomChat.setAiTyping === 'function') {
+            window.roomChat.setAiTyping(!!data.typing, data.bot_name || 'Em bé floor 2');
+        }
+    });
+
     socket.on('error', (err) => {
         if (err.message) showToast(err.message, 'warning');
     });
@@ -1413,6 +1454,7 @@ function updateRoomUI(room) {
     if (privBadge) privBadge.classList.toggle('hidden', !room.is_private);
 
     updateHostControls();
+    updateAutoDjUI();
     renderSkipVoteButton(room.skip_vote || null);
     renderPriorityBanner(room.priority_request || null);
     renderQueue();
@@ -1421,6 +1463,9 @@ function updateRoomUI(room) {
     loadRelatedSuggestionsForTrack(room.current_track || null, room.related_suggestions || null);
     loadLyricsForTrack(room.current_track || null);
     loadRoomQuickSuggestions(room.id);
+    if (room.current_track && (parseFloat(room.current_time || 0) < 20)) {
+        triggerMcRadioIntroForTrack(room.current_track);
+    }
 }
 
 function renderSkipVoteButton(skipVote) {
@@ -1557,6 +1602,8 @@ function updateHostControls() {
             ? `<span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>DJ: Bật</span>`
             : `<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span><span>DJ: Tắt</span>`;
     }
+
+    updateMcToggleUI();
 
     const searchInput = document.getElementById('search-music-input');
     if (searchInput) {
@@ -2064,6 +2111,10 @@ function initRoomControls() {
     if (chatForm && chatInput) {
         chatForm.onsubmit = async (e) => {
             e.preventDefault();
+            if (chatMentionState.isOpen && chatMentionState.filtered.length > 0) {
+                selectChatMentionCandidate(chatMentionState.activeIndex);
+                return;
+            }
             const text = chatInput.value.trim();
             const pendingFile = window.appState.pendingImageFile;
 
@@ -2085,6 +2136,8 @@ function initRoomControls() {
                     }
                     window.roomSocket.sendImage(data.media_id, text);
                     chatInput.value = '';
+                    updateChatInputMentionMirror();
+                    closeChatMentionPopover();
                     clearPendingChatImage();
                 } catch (err) {
                     showToast('Lỗi khi gửi hình ảnh: ' + err.message, 'error');
@@ -2097,6 +2150,8 @@ function initRoomControls() {
             if (text) {
                 window.roomSocket.sendChat(text);
                 chatInput.value = '';
+                updateChatInputMentionMirror();
+                closeChatMentionPopover();
             }
         };
     }
@@ -3360,4 +3415,757 @@ function escapeHtml(str) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+}
+
+// =============================================================================
+// AI FEATURES ("@Em bé floor 2" — Chat Tag, AI DJ, Room Vibe Card & Female Radio MC)
+// =============================================================================
+const mcRadioState = {
+    lastSpokenUid: null,
+    fetchingUid: null,
+    abortController: null,
+    watchdogTimer: null,
+    isSpeaking: false,
+    currentTracks: [],
+};
+
+function updateMcToggleUI() {
+    const btn = document.getElementById('btn-mc-radio-toggle');
+    const lbl = document.getElementById('mc-radio-toggle-label');
+    if (!btn) return;
+    const isHost = !!window.appState.isHost;
+    const on = !!(window.appState.roomData && window.appState.roomData.mc_enabled);
+    window.appState.mcEnabled = on;
+    btn.classList.toggle('hidden', !isHost);
+    if (lbl) lbl.textContent = on ? 'MC: Bật' : 'MC: Tắt';
+    btn.classList.toggle('border-pink-500/45', on);
+    btn.classList.toggle('bg-pink-500/15', on);
+    btn.classList.toggle('text-pink-600', on);
+    btn.classList.toggle('dark:text-pink-300', on);
+}
+
+function stopMcRadioSpeech() {
+    if (mcRadioState.abortController) {
+        mcRadioState.abortController.abort();
+        mcRadioState.abortController = null;
+    }
+    if (mcRadioState.watchdogTimer) {
+        clearTimeout(mcRadioState.watchdogTimer);
+        mcRadioState.watchdogTimer = null;
+    }
+    mcRadioState.fetchingUid = null;
+    mcRadioState.isSpeaking = false;
+    const audioEl = document.getElementById('mc-tts-audio-player');
+    if (audioEl) {
+        try {
+            audioEl.onended = null;
+            audioEl.onerror = null;
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+        } catch (_) {}
+    }
+    if (window.speechSynthesis) {
+        try { window.speechSynthesis.cancel(); } catch (_) {}
+    }
+    document.getElementById('mc-radio-subtitle-bar')?.classList.add('hidden');
+    if (window.syncPlayer && typeof window.syncPlayer.setMcDucking === 'function') {
+        window.syncPlayer.setMcDucking(false);
+    }
+}
+
+function pickNaturalVietnameseFemaleVoice() {
+    if (!window.speechSynthesis) return null;
+    const voices = (window.speechSynthesis.getVoices() || []).filter(v => /^vi/i.test(v.lang || ''));
+    if (voices.length === 0) return null;
+    const score = (v) => {
+        const n = (v.name || '').toLowerCase();
+        let s = 0;
+        if (/natural|neural|online/.test(n)) s += 50;      // Edge "Microsoft HoaiMy Online (Natural)"
+        if (/hoaimy|hoai my/.test(n)) s += 30;
+        if (/microsoft/.test(n)) s += 10;
+        if (/an|linh|female|nữ|nu\b/.test(n)) s += 5;
+        if (/google/.test(n)) s -= 40;                       // robotic "chị Google" — last resort only
+        if (/nam ?minh|male/.test(n)) s -= 60;               // male voices
+        return s;
+    };
+    return voices.sort((a, b) => score(b) - score(a))[0];
+}
+
+if (window.speechSynthesis) {
+    // Voices load asynchronously in Chrome/Edge — warm the list early
+    try { window.speechSynthesis.getVoices(); } catch (_) {}
+    window.speechSynthesis.onvoiceschanged = () => { try { window.speechSynthesis.getVoices(); } catch (_) {} };
+}
+
+function speakWithBrowserFemaleFallback(scriptText) {
+    if (!window.speechSynthesis || !scriptText) {
+        stopMcRadioSpeech();
+        return;
+    }
+    const voice = pickNaturalVietnameseFemaleVoice();
+    if (!voice) {
+        // No Vietnamese voice on this device: never let the browser read Vietnamese with an English voice.
+        // Keep the subtitle on screen briefly instead, then restore music volume.
+        if (mcRadioState.watchdogTimer) clearTimeout(mcRadioState.watchdogTimer);
+        mcRadioState.watchdogTimer = setTimeout(() => stopMcRadioSpeech(), 6000);
+        return;
+    }
+    try {
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(scriptText);
+        utter.lang = voice.lang || 'vi-VN';
+        utter.voice = voice;
+        const isNatural = voice && /natural|neural|online/i.test(voice.name || '');
+        utter.rate = isNatural ? 1.0 : 0.95;
+        utter.pitch = isNatural ? 1.0 : 1.05;
+        utter.onend = () => stopMcRadioSpeech();
+        utter.onerror = () => stopMcRadioSpeech();
+        window.speechSynthesis.speak(utter);
+    } catch (_) {
+        stopMcRadioSpeech();
+    }
+}
+
+async function triggerMcRadioIntroForTrack(track) {
+    const mcOn = !!(window.appState.roomData && window.appState.roomData.mc_enabled);
+    if (!mcOn || !track || !track.id || !window.appState.roomId) {
+        return;
+    }
+    const trackKey = track.uid || track.id;
+    if (mcRadioState.lastSpokenUid === trackKey || mcRadioState.fetchingUid === trackKey) {
+        return;
+    }
+    stopMcRadioSpeech();
+    mcRadioState.fetchingUid = trackKey;
+
+    const controller = new AbortController();
+    mcRadioState.abortController = controller;
+
+    // Immediately duck music volume & show intro banner right as the track starts
+    const bar = document.getElementById('mc-radio-subtitle-bar');
+    const txt = document.getElementById('mc-radio-subtitle-text');
+    if (txt) txt.textContent = `🎙️ MC Em bé floor 2 đang giới thiệu bài hát "${track.title || ''}"...`;
+    if (bar) bar.classList.remove('hidden');
+    if (window.syncPlayer && typeof window.syncPlayer.setMcDucking === 'function') {
+        window.syncPlayer.setMcDucking(true);
+    }
+
+    try {
+        const params = new URLSearchParams();
+        if (window.appState.inviteToken) params.set('invite', window.appState.inviteToken);
+        params.set('track_uid', trackKey);
+        const url = `/api/rooms/${encodeURIComponent(window.appState.roomId)}/ai/mc-intro?${params.toString()}`;
+        const fetchOpts = () => ({ headers: getAuthHeaders(), signal: controller.signal, cache: 'no-store' });
+
+        let res = await fetch(url, fetchOpts());
+        if (res.status === 401) {
+            await ensureSession(true, true).catch(() => {});
+            res = await fetch(url, fetchOpts());
+        }
+        if (!res.ok) {
+            stopMcRadioSpeech();
+            return;
+        }
+        const data = await res.json();
+        if (controller.signal.aborted || !(window.appState.roomData && window.appState.roomData.mc_enabled)) {
+            stopMcRadioSpeech();
+            return;
+        }
+        if (!data || !data.found || !data.script) {
+            stopMcRadioSpeech();
+            return;
+        }
+        // Drop the intro if the room already moved to another song while it was generating
+        const nowTrack = window.appState.roomData && window.appState.roomData.current_track;
+        const nowKey = nowTrack ? (nowTrack.uid || nowTrack.id) : null;
+        if (nowKey !== trackKey || (data.track_uid && data.track_uid !== trackKey && data.track_uid !== track.id)) {
+            if (mcRadioState.abortController === controller) stopMcRadioSpeech();
+            return;
+        }
+
+        mcRadioState.lastSpokenUid = trackKey;
+        mcRadioState.fetchingUid = null;
+        mcRadioState.isSpeaking = true;
+
+        if (txt) txt.textContent = `🎀 Em bé floor 2: “${data.script}”`;
+        if (bar) bar.classList.remove('hidden');
+        if (window.syncPlayer && typeof window.syncPlayer.setMcDucking === 'function') {
+            window.syncPlayer.setMcDucking(true);
+        }
+
+        // Safety watchdog: always restore full music volume within 22s even if browser tab backgrounded
+        mcRadioState.watchdogTimer = setTimeout(() => {
+            stopMcRadioSpeech();
+        }, 22000);
+
+        const audioEl = document.getElementById('mc-tts-audio-player');
+        if (data.audio_url && audioEl) {
+            audioEl.src = data.audio_url;
+            audioEl.volume = 1.0;
+            audioEl.onended = () => stopMcRadioSpeech();
+            audioEl.onerror = () => speakWithBrowserFemaleFallback(data.script);
+            audioEl.play().catch((err) => {
+                if (err && err.name === 'NotAllowedError') {
+                    // Autoplay blocked: play the Vietnamese MP3 on the next tap/click instead of a browser voice
+                    const resume = () => {
+                        if (mcRadioState.abortController === controller && audioEl.src) {
+                            audioEl.play().catch(() => stopMcRadioSpeech());
+                        }
+                    };
+                    document.addEventListener('pointerdown', resume, { once: true });
+                    return;
+                }
+                speakWithBrowserFemaleFallback(data.script);
+            });
+        } else {
+            speakWithBrowserFemaleFallback(data.script);
+        }
+    } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        stopMcRadioSpeech();
+    }
+}
+
+function updateAutoDjUI() {
+    const badge = document.getElementById('ai-auto-dj-badge');
+    const btn = document.getElementById('btn-toggle-auto-dj');
+    const isOn = !!(window.appState.roomData && window.appState.roomData.auto_dj);
+    const isHost = !!window.appState.isHost;
+
+    if (badge) {
+        badge.textContent = isOn ? 'Đang bật' : 'Tắt';
+        badge.className = isOn
+            ? 'px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 text-[10px] font-extrabold'
+            : 'px-2 py-0.5 rounded-full bg-slate-500/15 text-dim text-[10px] font-bold';
+    }
+    if (btn) {
+        btn.disabled = !isHost;
+        btn.classList.toggle('opacity-50', !isHost);
+        btn.classList.toggle('cursor-not-allowed', !isHost);
+        btn.textContent = isOn ? 'Tắt Auto-DJ' : 'Bật Auto-DJ';
+        btn.title = isHost ? 'Bật / Tắt tự động nối nhạc khi hết hàng đợi' : 'Chỉ Chủ phòng mới bật/tắt được Auto-DJ';
+    }
+}
+
+async function loadRoomVibeCard() {
+    if (!window.appState.roomId) return;
+    const card = document.getElementById('room-vibe-card');
+    const emojiEl = document.getElementById('room-vibe-emoji');
+    const titleEl = document.getElementById('room-vibe-title');
+    const genresEl = document.getElementById('room-vibe-genres');
+    const summaryEl = document.getElementById('room-vibe-summary');
+    if (!card) return;
+
+    card.classList.remove('hidden');
+    if (titleEl) titleEl.textContent = 'Em bé floor 2 đang đọc vị gu nhạc phòng...';
+    if (summaryEl) summaryEl.textContent = 'Đang phân tích bài đang phát, hàng đợi và gu của từng thành viên...';
+
+    try {
+        const params = new URLSearchParams();
+        if (window.appState.inviteToken) params.set('invite', window.appState.inviteToken);
+        const qStr = params.toString() ? `?${params.toString()}` : '';
+        const res = await fetch(
+            `/api/rooms/${encodeURIComponent(window.appState.roomId)}/ai/vibe${qStr}`,
+            { headers: getAuthHeaders() }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (emojiEl) emojiEl.textContent = data.emoji || '✨';
+        if (titleEl) titleEl.textContent = data.title || 'Góc nhạc đầy cảm xúc';
+        if (summaryEl) summaryEl.textContent = data.summary || '';
+        if (genresEl) {
+            const genres = Array.isArray(data.genres) ? data.genres : [];
+            genresEl.innerHTML = genres.map(g => `
+                <span class="px-2 py-0.5 rounded-full surface-subtle text-[10.5px] font-bold text-main">
+                    ${escapeHtml(g.name || 'Mix')} <span class="text-indigo-500 dark:text-indigo-300 font-mono-num">${parseInt(g.pct, 10) || 50}%</span>
+                </span>
+            `).join('');
+        }
+    } catch (_) {
+        if (titleEl) titleEl.textContent = 'Chưa thể đọc vị lúc này';
+        if (summaryEl) summaryEl.textContent = 'Hãy thử bấm làm mới lại sau vài giây nhé!';
+    }
+}
+
+function refreshRoomVibeIfOpen() {
+    const card = document.getElementById('room-vibe-card');
+    if (card && !card.classList.contains('hidden')) {
+        loadRoomVibeCard();
+    }
+}
+
+async function runAiDjPlaylist(promptText) {
+    if (!window.appState.roomId) return;
+    if (!canAddTrackInCurrentRoom()) return;
+
+    const listEl = document.getElementById('ai-dj-results-list');
+    const hdrEl = document.getElementById('ai-dj-results-header');
+    const noteEl = document.getElementById('ai-dj-vibe-note');
+    const submitBtn = document.getElementById('btn-submit-ai-dj');
+
+    if (submitBtn) submitBtn.disabled = true;
+    if (hdrEl) hdrEl.classList.add('hidden');
+    if (listEl) {
+        listEl.innerHTML = `
+            <div class="text-center py-8 space-y-2">
+                <div class="text-2xl animate-bounce">🎀</div>
+                <p class="text-xs font-bold text-main">Em bé floor 2 đang lựa bài hợp vibe phòng...</p>
+                <p class="text-[11px] text-dim">Đang đối chiếu lịch sử nghe và tìm bản nhạc chuẩn trên YouTube</p>
+            </div>
+        `;
+    }
+
+    try {
+        const params = new URLSearchParams();
+        if (window.appState.inviteToken) params.set('invite', window.appState.inviteToken);
+        const qStr = params.toString() ? `?${params.toString()}` : '';
+        const res = await fetch(
+            `/api/rooms/${encodeURIComponent(window.appState.roomId)}/ai/dj${qStr}`,
+            {
+                method: 'POST',
+                headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ prompt: promptText || '', count: 5 }),
+            }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không thể tạo playlist AI DJ lúc này', 'warning');
+            if (listEl) {
+                listEl.innerHTML = `<div class="text-center py-6 text-rose-500 text-xs">${escapeHtml(data.detail || 'Thử lại sau vài giây nhé!')}</div>`;
+            }
+            return;
+        }
+
+        const tracks = Array.isArray(data.tracks) ? data.tracks : [];
+        mcRadioState.currentTracks = tracks;
+
+        if (tracks.length === 0) {
+            if (listEl) {
+                listEl.innerHTML = `<div class="text-center py-6 text-dim text-xs">Chưa tìm thấy bài hát phù hợp. Hãy thử mô tả vibe khác nhé!</div>`;
+            }
+            return;
+        }
+
+        if (noteEl) noteEl.textContent = `🎀 ${data.vibe_note || 'Set nhạc tuyển chọn cho phòng mình'}`;
+        if (hdrEl) hdrEl.classList.remove('hidden');
+
+        const addAllBtn = document.getElementById('btn-ai-dj-add-all');
+        if (addAllBtn) {
+            addAllBtn.textContent = `+ Thêm tất cả (${tracks.length})`;
+            addAllBtn.className = 'px-3 py-1 rounded-xl btn-gradient text-[11px] font-extrabold flex-shrink-0';
+        }
+
+        if (listEl) {
+            listEl.innerHTML = '';
+            tracks.forEach((track, idx) => {
+                const row = document.createElement('div');
+                row.className = 'surface-subtle flex items-center justify-between gap-2.5 p-2 rounded-2xl';
+                row.innerHTML = `
+                    <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                        <img src="${safeThumbUrl(track.id)}" alt="" class="w-12 h-8 rounded-lg object-cover flex-shrink-0">
+                        <div class="min-w-0 flex-1">
+                            <div class="text-xs font-bold text-main truncate">${escapeHtml(track.title)}</div>
+                            <div class="text-[10.5px] text-sub truncate">${escapeHtml(track.author || '')}${track.duration_str ? ' • ' + escapeHtml(track.duration_str) : ''}</div>
+                            ${track.ai_reason ? `<div class="text-[10px] text-pink-600 dark:text-pink-300 truncate mt-0.5">✨ ${escapeHtml(track.ai_reason)}</div>` : ''}
+                        </div>
+                    </div>
+                    <button type="button" class="js-ai-dj-add-one px-3 py-1.5 rounded-xl btn-gradient text-xs font-bold flex-shrink-0" data-idx="${idx}">
+                        + Thêm
+                    </button>
+                `;
+                const addBtn = row.querySelector('.js-ai-dj-add-one');
+                if (addBtn) {
+                    addBtn.onclick = () => {
+                        if (!canAddTrackInCurrentRoom()) return;
+                        window.roomSocket.addTrack(track);
+                        addBtn.textContent = '✓ Đã thêm';
+                        addBtn.className = 'js-ai-dj-add-one px-3 py-1.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 text-xs font-bold flex-shrink-0';
+                    };
+                }
+                listEl.appendChild(row);
+            });
+        }
+    } catch (err) {
+        if (listEl) {
+            listEl.innerHTML = `<div class="text-center py-6 text-rose-500 text-xs">Lỗi kết nối AI DJ. Vui lòng thử lại!</div>`;
+        }
+    } finally {
+        if (submitBtn) submitBtn.disabled = false;
+    }
+}
+
+function initAiFeatures() {
+    updateMcToggleUI();
+
+    // 1. Toggle Female Radio MC ON / OFF (Host-only room control)
+    document.getElementById('btn-mc-radio-toggle')?.addEventListener('click', () => {
+        if (!window.appState.isHost) {
+            showToast('Chỉ Chủ phòng mới được bật/tắt MC Radio', 'warning');
+            return;
+        }
+        // Prime audio element on user click gesture so browser allows future MC speech playback
+        const audioEl = document.getElementById('mc-tts-audio-player');
+        if (audioEl && !mcRadioState.isSpeaking) {
+            try {
+                audioEl.volume = 1.0;
+                audioEl.muted = false;
+            } catch (_) {}
+        }
+        window.roomSocket.toggleMcMode();
+    });
+
+    document.getElementById('btn-stop-mc-speech')?.addEventListener('click', stopMcRadioSpeech);
+
+    // 2. Messenger-style '@' Mention Autocomplete + Live Input Bold Highlight
+    initChatMentionAutocomplete();
+
+    // 3. Room Vibe Card Toggle & Refresh
+    document.getElementById('btn-toggle-room-vibe')?.addEventListener('click', () => {
+        const card = document.getElementById('room-vibe-card');
+        if (!card) return;
+        if (card.classList.contains('hidden')) {
+            loadRoomVibeCard();
+        } else {
+            card.classList.add('hidden');
+        }
+    });
+    document.getElementById('btn-refresh-room-vibe')?.addEventListener('click', () => loadRoomVibeCard());
+    document.getElementById('btn-close-room-vibe')?.addEventListener('click', () => {
+        document.getElementById('room-vibe-card')?.classList.add('hidden');
+    });
+
+    // 4. AI DJ Modal & Auto-DJ
+    const djModal = document.getElementById('ai-dj-modal');
+    const closeDjModal = () => djModal?.classList.add('hidden');
+
+    document.getElementById('btn-open-ai-dj')?.addEventListener('click', () => {
+        if (!canAddTrackInCurrentRoom()) return;
+        updateAutoDjUI();
+        djModal?.classList.remove('hidden');
+        document.getElementById('ai-dj-prompt-input')?.focus();
+    });
+    document.getElementById('btn-close-ai-dj-modal')?.addEventListener('click', closeDjModal);
+    djModal?.addEventListener('click', (e) => {
+        if (e.target === djModal) closeDjModal();
+    });
+
+    document.getElementById('btn-toggle-auto-dj')?.addEventListener('click', () => {
+        if (!window.appState.isHost) {
+            showToast('Chỉ Chủ phòng mới bật/tắt được Auto-DJ', 'warning');
+            return;
+        }
+        window.roomSocket.toggleAutoDj();
+    });
+
+    document.getElementById('ai-dj-form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const inp = document.getElementById('ai-dj-prompt-input');
+        runAiDjPlaylist(inp ? inp.value.trim() : '');
+    });
+
+    document.querySelectorAll('.js-ai-vibe-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+            const p = chip.getAttribute('data-prompt') || '';
+            const inp = document.getElementById('ai-dj-prompt-input');
+            if (inp) inp.value = p;
+            runAiDjPlaylist(p);
+        });
+    });
+
+    // Enable vertical mouse-wheel -> horizontal scroll on all horizontal chip strips
+    document.querySelectorAll('.overflow-x-auto').forEach(strip => {
+        if (strip.id === 'quick-suggestions-chips') return; // already bound
+        strip.addEventListener('wheel', (e) => {
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && strip.scrollWidth > strip.clientWidth) {
+                e.preventDefault();
+                strip.scrollLeft += e.deltaY * 0.85;
+            }
+        }, { passive: false });
+    });
+
+    document.getElementById('btn-ai-dj-add-all')?.addEventListener('click', () => {
+        if (!canAddTrackInCurrentRoom()) return;
+        const tracks = mcRadioState.currentTracks || [];
+        if (tracks.length === 0) return;
+        tracks.slice(0, 4).forEach((t, i) => {
+            setTimeout(() => window.roomSocket.addTrack(t), i * 180);
+        });
+        const addAllBtn = document.getElementById('btn-ai-dj-add-all');
+        if (addAllBtn) {
+            addAllBtn.textContent = '✓ Đã thêm vào hàng đợi';
+            addAllBtn.className = 'px-3 py-1 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 text-[11px] font-extrabold flex-shrink-0';
+        }
+    });
+}
+
+// =============================================================================
+// MESSENGER-STYLE '@' MENTION AUTOCOMPLETE & LIVE BOLD INPUT HIGHLIGHT
+// =============================================================================
+const chatMentionState = {
+    isOpen: false,
+    filtered: [],
+    activeIndex: 0,
+    mentionStartIdx: -1,
+    mentionEndIdx: -1,
+};
+
+function stripViAccents(str) {
+    return (str || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .toLowerCase();
+}
+
+function getChatMentionCandidates() {
+    const list = [
+        {
+            name: 'Em bé floor 2',
+            avatar: '🎀',
+            color: '#ec4899',
+            badge: '✨ Trợ lý AI',
+            subtitle: 'Tán gẫu mọi chuyện & gợi ý nhạc',
+            isAi: true,
+        },
+    ];
+    const users = (window.appState.roomData && Array.isArray(window.appState.roomData.users))
+        ? window.appState.roomData.users
+        : [];
+    users.forEach(u => {
+        if (u && u.name) {
+            list.push({
+                name: u.name,
+                avatar: u.avatar || '🎧',
+                color: safeColor(u.color),
+                badge: u.is_host ? '👑 Host' : 'Thành viên',
+                subtitle: u.id === window.appState.userId ? 'Bạn' : 'Đang trong phòng',
+                isAi: false,
+            });
+        }
+    });
+    return list;
+}
+
+function closeChatMentionPopover() {
+    chatMentionState.isOpen = false;
+    chatMentionState.filtered = [];
+    chatMentionState.activeIndex = 0;
+    document.getElementById('chat-mention-popover')?.classList.add('hidden');
+}
+
+function renderChatMentionPopover() {
+    const pop = document.getElementById('chat-mention-popover');
+    const listEl = document.getElementById('chat-mention-list');
+    if (!pop || !listEl) return;
+
+    if (!chatMentionState.isOpen || chatMentionState.filtered.length === 0) {
+        pop.classList.add('hidden');
+        return;
+    }
+
+    pop.classList.remove('hidden');
+    listEl.innerHTML = '';
+
+    chatMentionState.filtered.forEach((cand, idx) => {
+        const isActive = idx === chatMentionState.activeIndex;
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `w-full flex items-center justify-between gap-2.5 p-2 rounded-xl text-left transition ${
+            isActive ? 'bg-indigo-500/15 ring-1 ring-indigo-500/40' : 'hover:bg-black/5 dark:hover:bg-white/5'
+        }`;
+
+        const badgeCls = cand.isAi
+            ? 'bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-600 dark:text-pink-300 border border-pink-500/35'
+            : 'surface-subtle text-sub';
+
+        row.innerHTML = `
+            <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm flex-shrink-0 shadow-sm"
+                     style="background-color: ${cand.color}22; border: 1.5px solid ${cand.color}88">
+                    ${escapeHtml(cand.avatar)}
+                </div>
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-xs font-extrabold text-main truncate">@${escapeHtml(cand.name)}</span>
+                        <span class="px-1.5 py-0.2 rounded-full text-[9.5px] font-extrabold flex-shrink-0 ${badgeCls}">${escapeHtml(cand.badge)}</span>
+                    </div>
+                    <p class="text-[10.5px] text-dim truncate">${escapeHtml(cand.subtitle)}</p>
+                </div>
+            </div>
+        `;
+
+        row.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            selectChatMentionCandidate(idx);
+        });
+        row.addEventListener('mouseenter', () => {
+            chatMentionState.activeIndex = idx;
+        });
+
+        listEl.appendChild(row);
+    });
+}
+
+function selectChatMentionCandidate(idx) {
+    const input = document.getElementById('chat-text-input');
+    const cand = chatMentionState.filtered[idx];
+    if (!input || !cand) return;
+
+    const val = input.value;
+    const before = val.slice(0, chatMentionState.mentionStartIdx);
+    const after = val.slice(chatMentionState.mentionEndIdx);
+    const insertText = `@${cand.name} `;
+    const nextVal = before + insertText + after.replace(/^\s+/, '');
+
+    input.value = nextVal;
+    const nextCaret = (before + insertText).length;
+    input.focus();
+    try {
+        input.setSelectionRange(nextCaret, nextCaret);
+    } catch (_) {}
+
+    closeChatMentionPopover();
+    updateChatInputMentionMirror();
+}
+
+function updateChatInputMentionMirror() {
+    const input = document.getElementById('chat-text-input');
+    const mirror = document.getElementById('chat-input-mirror');
+    const wrap = document.getElementById('chat-input-box-wrap');
+    if (!input || !mirror) return;
+
+    const val = input.value || '';
+    if (!val || !val.includes('@')) {
+        input.classList.remove('has-mention-highlight');
+        mirror.classList.add('hidden');
+        mirror.innerHTML = '';
+        wrap?.classList.remove('ring-1', 'ring-pink-500/45');
+        return;
+    }
+
+    const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const users = (window.appState.roomData && Array.isArray(window.appState.roomData.users))
+        ? window.appState.roomData.users
+        : [];
+    const memberNames = users
+        .map(u => escapeHtml((u && u.name) || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length)
+        .map(n => `@${escapeRegex(n)}`);
+
+    const aiPat = `@(?:Em\\s+b(?:é|e)\\s+floor\\s+2|embefloor2)`;
+    const combined = new RegExp(`(${[aiPat, ...memberNames].join('|')})`, 'gi');
+    const safeVal = escapeHtml(val);
+
+    if (!combined.test(safeVal)) {
+        input.classList.remove('has-mention-highlight');
+        mirror.classList.add('hidden');
+        mirror.innerHTML = '';
+        wrap?.classList.remove('ring-1', 'ring-pink-500/45');
+        return;
+    }
+
+    combined.lastIndex = 0;
+    let hasAiTag = false;
+    const highlightedHtml = safeVal.replace(combined, (match) => {
+        const isAi = /^@(?:em\s+b(?:é|e)\s+floor\s+2|embefloor2)$/i.test(match);
+        if (isAi) hasAiTag = true;
+        const cls = isAi ? 'chat-input-mention-ai' : 'chat-input-mention-user';
+        return `<span class="${cls}">${match}</span>`;
+    });
+
+    input.classList.add('has-mention-highlight');
+    mirror.classList.remove('hidden');
+    mirror.innerHTML = highlightedHtml;
+    mirror.scrollLeft = input.scrollLeft;
+    wrap?.classList.toggle('ring-1', hasAiTag);
+    wrap?.classList.toggle('ring-pink-500/45', hasAiTag);
+}
+
+function initChatMentionAutocomplete() {
+    const input = document.getElementById('chat-text-input');
+    const mirror = document.getElementById('chat-input-mirror');
+    if (!input) return;
+
+    const syncScroll = () => {
+        if (mirror && !mirror.classList.contains('hidden')) {
+            mirror.scrollLeft = input.scrollLeft;
+        }
+    };
+
+    const checkMentionTrigger = () => {
+        updateChatInputMentionMirror();
+        const val = input.value || '';
+        const caret = typeof input.selectionStart === 'number' ? input.selectionStart : val.length;
+        const beforeCaret = val.slice(0, caret);
+
+        // Find last '@' that is either at index 0 or preceded by whitespace
+        const m = beforeCaret.match(/(?:^|\s)@([^\n@]{0,22})$/);
+        if (!m) {
+            closeChatMentionPopover();
+            return;
+        }
+
+        const rawQuery = m[1];
+        // If user already finished typing '@Em bé floor 2 ' with trailing space, close popup
+        if (/^(?:em\s+b(?:é|e)\s+floor\s+2|embefloor2)\s+/i.test(rawQuery)) {
+            closeChatMentionPopover();
+            return;
+        }
+
+        const atIdx = beforeCaret.lastIndexOf('@');
+        const qNorm = stripViAccents(rawQuery.trim());
+        const candidates = getChatMentionCandidates().filter(c => {
+            if (!qNorm) return true;
+            const cNorm = stripViAccents(c.name);
+            return cNorm.includes(qNorm) || (c.isAi && 'ai tro ly em be floor 2'.includes(qNorm));
+        });
+
+        if (candidates.length === 0) {
+            closeChatMentionPopover();
+            return;
+        }
+
+        chatMentionState.isOpen = true;
+        chatMentionState.filtered = candidates;
+        chatMentionState.activeIndex = 0;
+        chatMentionState.mentionStartIdx = atIdx;
+        chatMentionState.mentionEndIdx = caret;
+        renderChatMentionPopover();
+    };
+
+    input.addEventListener('input', checkMentionTrigger);
+    input.addEventListener('click', checkMentionTrigger);
+    input.addEventListener('keyup', syncScroll);
+    input.addEventListener('scroll', syncScroll);
+
+    input.addEventListener('keydown', (e) => {
+        if (!chatMentionState.isOpen || chatMentionState.filtered.length === 0) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            chatMentionState.activeIndex = (chatMentionState.activeIndex + 1) % chatMentionState.filtered.length;
+            renderChatMentionPopover();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            chatMentionState.activeIndex = (chatMentionState.activeIndex - 1 + chatMentionState.filtered.length) % chatMentionState.filtered.length;
+            renderChatMentionPopover();
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            selectChatMentionCandidate(chatMentionState.activeIndex);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeChatMentionPopover();
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        const pop = document.getElementById('chat-mention-popover');
+        if (chatMentionState.isOpen && pop && !pop.contains(e.target) && e.target !== input) {
+            closeChatMentionPopover();
+        }
+    });
 }

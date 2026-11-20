@@ -37,7 +37,7 @@
     </script>
 
     <!-- Custom Dual-Theme Stylesheet -->
-    <link rel="stylesheet" href="/static/css/style.css?v=2.19">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.25">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎵</text></svg>">
 </head>
 <body class="min-h-screen flex flex-col selection:bg-indigo-500 selection:text-white">
@@ -571,6 +571,16 @@
                             <span>Trình duyệt đang chặn tự phát nhạc — Bấm vào đây để bật âm thanh cùng phòng</span>
                         </button>
 
+                        <!-- AI MC Radio Live Subtitle Banner (Shown while female MC "Em bé floor 2" speaks) -->
+                        <audio id="mc-tts-audio-player" preload="none" class="hidden"></audio>
+                        <div id="mc-radio-subtitle-bar" class="hidden mt-3 px-3.5 py-2 rounded-2xl bg-gradient-to-r from-pink-500/15 via-violet-500/15 to-indigo-500/10 border border-pink-500/30 flex items-center justify-between gap-2.5">
+                            <div class="flex items-center gap-2 min-w-0 flex-1">
+                                <span class="w-6 h-6 rounded-full bg-pink-500/20 text-pink-500 flex items-center justify-center text-xs flex-shrink-0 animate-pulse">🎙️</span>
+                                <p id="mc-radio-subtitle-text" class="text-xs font-semibold text-main leading-snug line-clamp-2"></p>
+                            </div>
+                            <button type="button" id="btn-stop-mc-speech" class="text-[11px] font-bold text-sub hover:text-rose-500 px-2 py-0.5 rounded-lg surface-subtle flex-shrink-0" title="Tắt giọng đọc ngay">Bỏ qua</button>
+                        </div>
+
                         <!-- Progress Scrubber (Personal Local Seek) -->
                         <div class="mt-4 flex items-center gap-3">
                             <span id="player-time-current" class="text-[11px] font-mono-num text-sub w-11 text-right flex-shrink-0">00:00</span>
@@ -607,6 +617,14 @@
                                     <span id="skip-vote-label">Qua bài</span>
                                     <span id="skip-vote-count" class="px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[11px] font-mono-num">0/1</span>
                                 </button>
+
+                                <!-- Female AI Radio MC Toggle (Host-only — Default OFF) -->
+                                <button type="button" id="btn-mc-radio-toggle"
+                                    class="hidden surface-subtle px-3 py-2 rounded-full text-xs font-bold text-main hover:border-pink-500/40 inline-flex items-center gap-1.5 transition"
+                                    title="Chủ phòng Bật / Tắt giọng nữ MC Radio Em bé floor 2 cho cả phòng">
+                                    <span>🎙️</span>
+                                    <span id="mc-radio-toggle-label">MC: Tắt</span>
+                                </button>
                             </div>
 
                             <!-- Local Volume -->
@@ -629,7 +647,13 @@
                             <span id="quick-suggestions-badge" class="hidden px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold flex-shrink-0">Liên quan</span>
                         </div>
                         <div class="flex items-center gap-2 flex-shrink-0">
-                            <span id="quick-suggestions-subtitle" class="text-[11px] text-dim hidden sm:inline">Kéo chuột hoặc cuộn ngang để xem 10 bài</span>
+                            <button type="button" id="btn-open-ai-dj"
+                                class="btn-gradient px-3 py-1 rounded-full text-[11px] font-extrabold inline-flex items-center gap-1 shadow-sm"
+                                title="Nhờ AI DJ Em bé floor 2 tạo playlist theo tâm trạng / vibe">
+                                <span>🎀</span>
+                                <span>AI DJ</span>
+                            </button>
+                            <span id="quick-suggestions-subtitle" class="text-[11px] text-dim hidden md:inline">Kéo ngang xem 10 bài</span>
                             <div class="inline-flex items-center gap-1">
                                 <button type="button" id="btn-suggestions-prev" class="surface-subtle w-6 h-6 rounded-full flex items-center justify-center text-sub hover:text-main transition disabled:opacity-35" title="Xem bài trước" aria-label="Cuộn trái">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
@@ -659,7 +683,36 @@
                                 <span class="hidden sm:inline">Lịch sử đã phát</span>
                             </button>
                         </div>
-                        <span id="queue-duration-badge" class="text-[11px] font-medium text-dim truncate">Phát FIFO</span>
+                        <div class="flex items-center gap-2">
+                            <button type="button" id="btn-toggle-room-vibe"
+                                class="surface-subtle px-2.5 py-1 rounded-xl text-[11px] font-bold text-indigo-600 dark:text-indigo-300 hover:border-indigo-500/40 inline-flex items-center gap-1 transition"
+                                title="AI đọc vị gu âm nhạc & tâm trạng hiện tại của phòng">
+                                <span>🎭</span>
+                                <span>Vibe phòng</span>
+                            </button>
+                            <span id="queue-duration-badge" class="hidden sm:inline text-[11px] font-medium text-dim truncate">Phát FIFO</span>
+                        </div>
+                    </div>
+
+                    <!-- AI ROOM VIBE CARD (Nhóm 2A — Collapsible Mood & Genre Breakdown) -->
+                    <div id="room-vibe-card" class="hidden mb-4 p-3.5 rounded-2xl border border-pink-500/30 bg-gradient-to-r from-indigo-500/10 via-violet-500/10 to-pink-500/10">
+                        <div class="flex items-start justify-between gap-2.5">
+                            <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                                <div id="room-vibe-emoji" class="w-10 h-10 rounded-2xl bg-white/15 border border-pink-500/30 flex items-center justify-center text-xl flex-shrink-0">✨</div>
+                                <div class="min-w-0 flex-1">
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <span class="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-pink-500/15 text-pink-600 dark:text-pink-300">🎀 Em bé floor 2 đọc vị</span>
+                                        <h5 id="room-vibe-title" class="text-xs sm:text-sm font-extrabold text-main">Đang phân tích gu nhạc...</h5>
+                                    </div>
+                                    <div id="room-vibe-genres" class="flex flex-wrap items-center gap-1.5 mt-1.5"></div>
+                                    <p id="room-vibe-summary" class="text-xs text-sub leading-relaxed mt-1.5"></p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-1 flex-shrink-0">
+                                <button type="button" id="btn-refresh-room-vibe" class="surface-subtle w-7 h-7 rounded-xl flex items-center justify-center text-sub hover:text-main text-xs" title="Phân tích lại">🔄</button>
+                                <button type="button" id="btn-close-room-vibe" class="surface-subtle w-7 h-7 rounded-xl flex items-center justify-center text-sub hover:text-main text-xs" title="Ẩn thẻ Vibe">✕</button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- LIVE SONG PRIORITY VOTE BANNER -->
@@ -828,7 +881,16 @@
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="😂" title="Haha">😂</button>
                     </div>
 
-                    <!-- Rich Chat Composer (Sticker + GIF + Image Upload + Text) -->
+                    <!-- @MENTION AUTOCOMPLETE POPUP (Messenger-style when typing '@') -->
+                    <div id="chat-mention-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[58px] surface-dropdown rounded-2xl p-1.5 z-50 shadow-xl">
+                        <div class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-dim flex items-center justify-between">
+                            <span>Nhắc tên (@mention)</span>
+                            <span class="font-mono-num">↑↓ • Enter</span>
+                        </div>
+                        <div id="chat-mention-list" class="space-y-0.5 max-h-44 overflow-y-auto"></div>
+                    </div>
+
+                    <!-- Rich Chat Composer (Sticker + GIF + Image Upload + Text with Live @Highlight) -->
                     <form id="chat-input-form" class="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-theme flex-shrink-0">
                         <input type="file" id="chat-image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
                         <div class="flex items-center gap-1.5">
@@ -843,13 +905,15 @@
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
                             </button>
 
-                            <!-- Text Input + Send Button -->
-                            <div class="relative flex-1 flex items-center min-w-0">
+                            <!-- Text Input + Live Bold @Mention Mirror + Send Button -->
+                            <div id="chat-input-box-wrap" class="relative flex-1 flex items-center min-w-0 input-field rounded-full">
+                                <div id="chat-input-mirror" aria-hidden="true"
+                                    class="hidden absolute inset-0 pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm flex items-center"></div>
                                 <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
-                                    class="input-field w-full pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm"
-                                    placeholder="Nhắn tin...">
+                                    class="relative z-10 bg-transparent border-0 focus:outline-none focus:ring-0 w-full pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm"
+                                    placeholder="Nhắn tin (gõ @ gọi Em bé floor 2)...">
                                 <button type="submit" id="btn-chat-send"
-                                    class="btn-gradient absolute right-1 w-8 h-8 rounded-full flex items-center justify-center"
+                                    class="btn-gradient absolute right-1 z-20 w-8 h-8 rounded-full flex items-center justify-center"
                                     title="Gửi tin nhắn">
                                     <svg class="w-4 h-4 translate-x-[1px]" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
                                 </button>
@@ -933,10 +997,78 @@
         </div>
     </div>
 
+    <!-- AI DJ Modal ("@Em bé floor 2" Natural-Language Vibe Playlist + Auto-DJ) -->
+    <div id="ai-dj-modal" class="hidden fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-center justify-center p-3.5 sm:p-4">
+        <div class="surface-dropdown max-w-lg w-full rounded-3xl p-4 sm:p-6 space-y-4 max-h-[88dvh] flex flex-col">
+            <div class="flex items-start justify-between gap-3 flex-shrink-0">
+                <div class="flex items-center gap-2.5 min-w-0">
+                    <div class="w-10 h-10 rounded-2xl bg-gradient-to-br from-pink-500 to-violet-600 text-white flex items-center justify-center text-lg shadow-md flex-shrink-0">🎀</div>
+                    <div class="min-w-0">
+                        <h3 class="text-sm sm:text-base font-extrabold text-main truncate">AI DJ — Em bé floor 2</h3>
+                        <p class="text-[11px] text-sub truncate">Tạo playlist theo tâm trạng & gu riêng của phòng</p>
+                    </div>
+                </div>
+                <button type="button" id="btn-close-ai-dj-modal" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
+            </div>
+
+            <!-- Host Auto-DJ Switch (Auto-continues music when queue ends) -->
+            <div id="ai-auto-dj-row" class="surface-subtle px-3.5 py-2.5 rounded-2xl flex items-center justify-between gap-3 flex-shrink-0">
+                <div class="min-w-0">
+                    <div class="text-xs font-bold text-main flex items-center gap-1.5">
+                        <span>🤖 Auto-DJ khi hết hàng đợi</span>
+                        <span id="ai-auto-dj-badge" class="px-1.5 py-0.2 rounded-full bg-slate-500/15 text-dim text-[10px] font-bold">Tắt</span>
+                    </div>
+                    <p class="text-[10.5px] text-sub mt-0.5">Tự động chọn & phát tiếp bài hợp gu khi danh sách chờ phát hết</p>
+                </div>
+                <button type="button" id="btn-toggle-auto-dj" class="surface-subtle px-3 py-1.5 rounded-xl text-xs font-bold text-main hover:border-pink-500/40 flex-shrink-0 transition">
+                    Bật / Tắt
+                </button>
+            </div>
+
+            <!-- Vibe Prompt Form -->
+            <form id="ai-dj-form" class="space-y-2.5 flex-shrink-0">
+                <div class="flex gap-2">
+                    <input type="text" id="ai-dj-prompt-input" maxlength="200" autocomplete="off"
+                        class="input-field flex-1 px-3.5 py-2.5 rounded-xl text-base sm:text-xs font-medium"
+                        placeholder="Mô tả vibe (VD: nhạc Việt chill mưa Sài Gòn để code, US-UK sôi động...)">
+                    <button type="submit" id="btn-submit-ai-dj" class="btn-gradient px-4 py-2.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 flex-shrink-0">
+                        <span>✨</span>
+                        <span>Phối nhạc</span>
+                    </button>
+                </div>
+
+                <!-- Quick Preset Vibe Chips (Wrapped cleanly so all chips are 100% visible without clipping) -->
+                <div id="ai-dj-vibe-chips" class="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Chọn các bài hit đang trending và hợp gu lịch sử nghe hiện tại của các thành viên trong phòng">✨ Hợp gu phòng</button>
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Top những bản siêu hit V-Pop đang trending và triệu view hot nhất">🔥 Hit V-Pop Trending</button>
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Nhạc V-Pop Acoustic & Indie chill nhẹ nhàng ngày mưa để làm việc và code">🌧️ Chill mưa & Code</button>
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Những bản hit Ballad Việt sâu lắng, da diết từng rất trending nghe đêm khuya">🌙 Ballad đêm muộn</button>
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Những bản hit Pop R&B tươi vui, yêu đời, năng lượng tích cực đang thịnh hành">☀️ Tươi vui yêu đời</button>
+                    <button type="button" class="js-ai-vibe-chip surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main hover:border-pink-500/40 transition" data-prompt="Những siêu hit US-UK Pop Dance tỉ view bắt tai sôi động khuấy động không khí">🎧 Hit US-UK</button>
+                </div>
+            </form>
+
+            <!-- AI DJ Results Area -->
+            <div id="ai-dj-results-wrap" class="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <div id="ai-dj-results-header" class="hidden flex items-center justify-between gap-2 pb-2 mb-2 border-b border-theme flex-shrink-0">
+                    <p id="ai-dj-vibe-note" class="text-xs font-semibold text-pink-600 dark:text-pink-300 truncate"></p>
+                    <button type="button" id="btn-ai-dj-add-all" class="px-3 py-1 rounded-xl btn-gradient text-[11px] font-extrabold flex-shrink-0">
+                        + Thêm tất cả
+                    </button>
+                </div>
+                <div id="ai-dj-results-list" class="space-y-1.5 overflow-y-auto pr-0.5 flex-1 min-h-0">
+                    <div class="text-center py-6 text-dim text-xs">
+                        Nhập tâm trạng hoặc chọn nhanh một thẻ vibe phía trên để <b>Em bé floor 2</b> lên danh sách nhạc nhé!
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
-    <script src="/static/js/socket.js?v=2.22"></script>
-    <script src="/static/js/player.js?v=2.22"></script>
-    <script src="/static/js/chat.js?v=2.22"></script>
-    <script src="/static/js/app.js?v=2.22"></script>
+    <script src="/static/js/socket.js?v=2.28"></script>
+    <script src="/static/js/player.js?v=2.28"></script>
+    <script src="/static/js/chat.js?v=2.28"></script>
+    <script src="/static/js/app.js?v=2.28"></script>
 </body>
 </html>

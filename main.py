@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -20,6 +21,22 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+from services.ai import (
+    AI_BOT_AVATAR,
+    AI_BOT_COLOR,
+    AI_BOT_ID,
+    AI_BOT_NAME,
+    analyze_room_vibe,
+    build_mc_context,
+    build_room_ai_context,
+    chat_with_em_be_floor_2,
+    extract_lyrics_excerpt,
+    generate_ai_dj_playlist,
+    get_ai_stats,
+    get_or_create_mc_intro,
+    is_ai_mention,
+    mc_audio_cache,
+)
 from services.cache import TTLCache
 from services.database import DatabaseManager
 from services.ddos import DDoSGuard
@@ -37,7 +54,7 @@ from services.keep_alive import (
     keep_alive_url,
     start_keep_alive,
 )
-from services.lyrics import get_lyrics_cache_stats, get_synced_lyrics
+from services.lyrics import get_lyrics_cache_stats, get_synced_lyrics, lyrics_cache
 from services.security import (
     Session,
     SessionManager,
@@ -113,15 +130,30 @@ def store_chat_media(raw: bytes, mime: str, uploader_id: str) -> str:
     return media_id
 
 
+async def _prewarm_mc_for_room(room: "Room") -> None:
+    """Pre-generate & cache female Radio MC intro + MP3 for current_track and #1 Up-Next track."""
+    if not room or not room.mc_enabled:
+        return
+    targets: List["Track"] = []
+    if room.current_track:
+        targets.append(room.current_track)
+    targets.extend(room.queue[:2])  # 2 Up-Next tracks so fast host skips still hit a ready intro
+    if not targets:
+        return
+    for t in targets[:3]:
+        try:
+            await get_or_create_mc_intro(room.id, t.to_dict(), build_mc_context(room, t))
+        except Exception:
+            pass
+
+
 def schedule_prewarm_room_related(room: "Room"):
-    """Proactively pre-warm YouTube related tracks for current_track and #1 Up-Next in background."""
+    """Proactively pre-warm YouTube related tracks & MC Radio intro for current_track and #1 Up-Next in background."""
     vids: List[str] = []
     if room.current_track and room.current_track.id:
         vids.append(room.current_track.id)
     if room.queue and room.queue[0].id and room.queue[0].id not in vids:
         vids.append(room.queue[0].id)
-    if not vids:
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -129,6 +161,8 @@ def schedule_prewarm_room_related(room: "Room"):
     for vid in vids:
         if get_cached_related_videos(vid) is None:
             loop.create_task(get_related_videos(vid, limit=14))
+    if room.mc_enabled and (room.current_track or room.queue):
+        loop.create_task(_prewarm_mc_for_room(room))
 
 
 async def _startup_prewarm():
@@ -351,6 +385,13 @@ class Room:
         # Active song priority vote request (1 per room at a time, majority >= 50%)
         self.priority_request: Optional[Dict] = None
 
+        # AI Auto-DJ mode (when True, "@Em bé floor 2" auto-queues a vibe-matched track when queue runs dry)
+        self.auto_dj: bool = False
+        self._auto_dj_busy: bool = False
+
+        # AI Female Radio MC mode (Host-only toggle, default OFF)
+        self.mc_enabled: bool = False
+
     def is_host(self, user_id: str) -> bool:
         return bool(user_id) and self.host_id == user_id
 
@@ -519,6 +560,8 @@ class Room:
             "created_at": self.created_at,
             "host_id": self.host_id,
             "dj_mode": self.dj_mode,
+            "auto_dj": self.auto_dj,
+            "mc_enabled": self.mc_enabled,
             "is_private": self.is_private,
             "has_passcode": bool(self.passcode_hash),
             "status": self.status,
@@ -577,6 +620,8 @@ class Room:
             "name": self.name,
             "host_id": self.host_id,
             "dj_mode": self.dj_mode,
+            "auto_dj": self.auto_dj,
+            "mc_enabled": self.mc_enabled,
             "is_private": self.is_private,
             "passcode_hash": self.passcode_hash,
             "invite_token": self.invite_token,
@@ -730,6 +775,550 @@ class RoomAccessRequest(BaseModel):
     invite_token: Optional[str] = Field(default=None, max_length=128)
 
 
+class AiDjRequest(BaseModel):
+    prompt: str = Field(default="", max_length=240)
+    count: int = Field(default=5, ge=1, le=8)
+
+
+async def get_room_lyrics_excerpt(room: "Room") -> str:
+    """Fetch cached (or quick 2.5s lookup) lyrics excerpt of current track for AI context."""
+    ct = room.current_track
+    if not ct:
+        return ""
+    cached = lyrics_cache.get(ct.id)
+    if cached is None:
+        try:
+            cached = await asyncio.wait_for(
+                get_synced_lyrics(title=ct.title, author=ct.author, duration=ct.duration, video_id=ct.id),
+                timeout=2.5,
+            )
+        except Exception:
+            cached = None
+    return extract_lyrics_excerpt(cached)
+
+
+_VN_NUM_WORD_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"\bmười\s+hai\b", re.IGNORECASE), "12"),
+    (re.compile(r"\bmười\s+một\b", re.IGNORECASE), "11"),
+    (re.compile(r"\bmười\b", re.IGNORECASE), "10"),
+    (re.compile(r"\bchín\b", re.IGNORECASE), "9"),
+    (re.compile(r"\btám\b", re.IGNORECASE), "8"),
+    (re.compile(r"\bbảy\b", re.IGNORECASE), "7"),
+    (re.compile(r"\bsáu\b", re.IGNORECASE), "6"),
+    (re.compile(r"\b(tháng|thứ)\s+năm\b", re.IGNORECASE), r"\1 5"),
+    (re.compile(r"\b(tháng|thứ)\s+tư\b", re.IGNORECASE), r"\1 4"),
+    (re.compile(r"\bbốn\b", re.IGNORECASE), "4"),
+    (re.compile(r"\b(tháng|thứ)\s+ba\b", re.IGNORECASE), r"\1 3"),
+    (re.compile(r"\bhai\b", re.IGNORECASE), "2"),
+    (re.compile(r"\bmột\b", re.IGNORECASE), "1"),
+]
+
+_NON_MUSIC_JUNK_KEYWORDS: Tuple[str, ...] = (
+    "tu luyen",
+    "chinh phap",
+    "phap luan",
+    "giang phap",
+    "thuyet phap",
+    "kinh phat",
+    "tin tuc",
+    "thoi su",
+    "ban tin",
+    "diem tin",
+    "interlude",
+    "teaser",
+    "trailer",
+    "reaction",
+    "review phim",
+    "tom tat phim",
+    "podcast",
+    "sach noi",
+    "audiobook",
+    "karaoke beat",
+    "beat chuan",
+    "nhac song dam cuoi",
+    "1 hour loop",
+    "10 hours",
+)
+
+
+def _normalize_vn_music_text(text: str) -> str:
+    """Normalize Vietnamese song/artist text and convert accented number words ('sáu' -> '6') before stripping diacritics."""
+    if not text:
+        return ""
+    s = text.strip().lower()
+    for pat, repl in _VN_NUM_WORD_PATTERNS:
+        s = pat.sub(repl, s)
+    s = s.replace("đ", "d")
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _prompt_wants_long_mix(prompt_norm: str) -> bool:
+    return any(
+        kw in prompt_norm
+        for kw in ("lofi", "mix", "playlist", "tuyen tap", "lien khuc", "mashup", "1 gio", "1 tieng", "nonstop")
+    )
+
+
+def _prompt_wants_remix_or_cover(prompt_norm: str) -> bool:
+    return any(kw in prompt_norm for kw in ("remix", "cover", "acoustic", "live", "karaoke", "sped up", "slowed"))
+
+
+def _is_valid_music_track(
+    item: Dict,
+    *,
+    allow_long_mix: bool = False,
+    prompt_norm: str = "",
+) -> bool:
+    """Reject non-music sermons/news/podcasts, <85s interludes/shorts, and >10.5m compilations."""
+    if not item or not item.get("id") or not item.get("title"):
+        return False
+    dur = int(item.get("duration") or 0)
+    if dur > 0:
+        if dur < 85:
+            return False
+        if not allow_long_mix and dur > 630:
+            return False
+
+    norm_all = _normalize_vn_music_text(f"{item.get('title', '')} {item.get('author', '')}")
+    for junk in _NON_MUSIC_JUNK_KEYWORDS:
+        if junk in norm_all and junk not in prompt_norm:
+            return False
+    return True
+
+
+def _score_youtube_hit_for_song(
+    hit: Dict,
+    req_title: str,
+    req_artist: str = "",
+    *,
+    allow_long_mix: bool = False,
+    want_remix_or_cover: bool = False,
+    prompt_norm: str = "",
+) -> float:
+    """Score how well a YouTube video matches a requested song title & artist, prioritizing official trending hits."""
+    if not _is_valid_music_track(hit, allow_long_mix=allow_long_mix, prompt_norm=prompt_norm):
+        return -999.0
+
+    hit_title = _normalize_vn_music_text(hit.get("title", ""))
+    hit_author = _normalize_vn_music_text(hit.get("author", ""))
+    hit_combined = f"{hit_title} {hit_author}"
+    t_norm = _normalize_vn_music_text(req_title)
+    a_norm = _normalize_vn_music_text(req_artist)
+
+    t_tokens = [w for w in t_norm.split() if len(w) > 1 or w.isdigit()]
+    if not t_tokens:
+        return -999.0
+
+    hit_words = set(hit_combined.split())
+    matched_t = sum(1 for w in t_tokens if w in hit_words or w in hit_title)
+    title_ratio = matched_t / len(t_tokens)
+
+    # Anti-hallucination guard: reject videos that do not match at least half of the song title words
+    if title_ratio < 0.5:
+        return -999.0
+
+    score = title_ratio * 10.0
+    if t_norm and t_norm in hit_title:
+        score += 6.5
+
+    if a_norm:
+        a_tokens = [w for w in a_norm.split() if len(w) > 1]
+        if a_tokens:
+            matched_a = sum(1 for w in a_tokens if w in hit_words or w in hit_combined)
+            if matched_a > 0:
+                score += 5.0 * (matched_a / len(a_tokens))
+            elif len(a_tokens) >= 2:
+                score -= 2.5
+
+    # Boost official artist channels & official MV / Lyric / Visualizer releases
+    if any(k in hit_title or k in hit_author for k in ("official", "vevo", "topic")) or "mv" in hit_words:
+        score += 4.5
+    if a_norm and (hit_author == a_norm or hit_author == f"{a_norm} official"):
+        score += 3.0
+
+    # Penalize fan clips, TV talk/reaction clips, behind-the-scenes
+    if any(k in hit_title for k in ("phan khich", "fan nu", "hau truong", "behind the scenes", "fancam", "phong van")):
+        score -= 6.0
+
+    if not want_remix_or_cover:
+        if any(k in hit_title for k in ("remix", "cover", "karaoke", "sped up", "slowed", "nightcore", "8d", "nhac chuong")):
+            score -= 4.5
+        if "solo version" in hit_title or "khong co" in hit_title:
+            score -= 2.5
+
+    return score
+
+
+async def _gather_ai_dj_youtube_candidates(
+    room: "Room",
+    vibe_prompt: str,
+    exclude_ids: Set[str],
+) -> Tuple[List[Dict], Optional[Dict]]:
+    """Pre-fetch real trending YouTube tracks matching the user's query + related hits for grounded AI DJ selection."""
+    clean_prompt = (vibe_prompt or "").strip()
+    prompt_norm = _normalize_vn_music_text(clean_prompt)
+    allow_long = _prompt_wants_long_mix(prompt_norm)
+    want_remix = _prompt_wants_remix_or_cover(prompt_norm)
+
+    candidates: List[Dict] = []
+    seen_ids: Set[str] = set(exclude_ids)
+    anchor_track: Optional[Dict] = None
+
+    is_custom_query = bool(
+        prompt_norm
+        and not any(
+            g in prompt_norm
+            for g in (
+                "hop gu phong",
+                "ket hop gu cua tat ca thanh vien",
+                "chill mua code",
+                "ballad dem muon",
+                "tuoi vui",
+                "auto dj",
+            )
+        )
+    )
+
+    direct_hits: List[Dict] = []
+    if clean_prompt:
+        try:
+            direct_hits = await search_youtube(clean_prompt[:90], limit=8)
+        except Exception:
+            direct_hits = []
+
+    if is_custom_query and direct_hits:
+        scored_direct = sorted(
+            (
+                (
+                    _score_youtube_hit_for_song(
+                        h,
+                        clean_prompt,
+                        "",
+                        allow_long_mix=allow_long,
+                        want_remix_or_cover=want_remix,
+                        prompt_norm=prompt_norm,
+                    ),
+                    h,
+                )
+                for h in direct_hits
+            ),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        if scored_direct and scored_direct[0][0] >= 11.5:
+            best_h = dict(scored_direct[0][1])
+            anchor_track = best_h
+
+    # Gather related trending songs from YouTube's collaborative graph (anchor song + room's current song)
+    related_tasks = []
+    seed_ids: List[str] = []
+    if anchor_track and anchor_track.get("id"):
+        seed_ids.append(anchor_track["id"])
+    elif direct_hits and _is_valid_music_track(direct_hits[0], allow_long_mix=allow_long, prompt_norm=prompt_norm):
+        seed_ids.append(direct_hits[0]["id"])
+
+    if room.current_track and room.current_track.id not in seed_ids:
+        seed_ids.append(room.current_track.id)
+
+    for sid in seed_ids[:2]:
+        cached_rel = get_cached_related_videos(sid, limit=12)
+        if cached_rel:
+            for r in cached_rel:
+                direct_hits.append(r)
+        else:
+            related_tasks.append(get_related_videos(sid, limit=12))
+
+    if related_tasks:
+        rel_lists = await asyncio.gather(*related_tasks, return_exceptions=True)
+        for rl in rel_lists:
+            if isinstance(rl, list):
+                direct_hits.extend(rl)
+
+    if anchor_track and anchor_track.get("id") not in seen_ids:
+        seen_ids.add(anchor_track["id"])
+        candidates.append(anchor_track)
+
+    for h in direct_hits:
+        vid = h.get("id")
+        if not vid or vid in seen_ids:
+            continue
+        if not _is_valid_music_track(h, allow_long_mix=allow_long, prompt_norm=prompt_norm):
+            continue
+        if not want_remix and any(
+            k in _normalize_vn_music_text(h.get("title", ""))
+            for k in ("remix", "karaoke", "sped up", "slowed", "nhac chuong")
+        ):
+            continue
+        seen_ids.add(vid)
+        candidates.append(dict(h))
+        if len(candidates) >= 16:
+            break
+
+    return candidates, anchor_track
+
+
+async def _resolve_ai_song_suggestions(
+    raw_songs: List[Dict[str, str]],
+    exclude_ids: Set[str],
+    limit: int = 6,
+    *,
+    vibe_prompt: str = "",
+    prefetched_candidates: Optional[List[Dict]] = None,
+    anchor_track: Optional[Dict] = None,
+) -> List[Dict]:
+    """Resolve AI {title, artist} pairs to verified, playable, trending YouTube music tracks in parallel."""
+    prompt_norm = _normalize_vn_music_text(vibe_prompt)
+    allow_long = _prompt_wants_long_mix(prompt_norm)
+    want_remix = _prompt_wants_remix_or_cover(prompt_norm)
+    candidate_pool = list(prefetched_candidates or [])
+
+    async def _lookup_one(s: Dict[str, str]) -> Optional[Dict]:
+        req_title = (s.get("title") or "").strip()
+        req_artist = (s.get("artist") or "").strip()
+        if not req_title:
+            return None
+
+        # 1. Check if any prefetched YouTube candidate already strongly matches this title + artist (0ms instant hit)
+        best_cand: Optional[Dict] = None
+        best_cand_score = -999.0
+        for c in candidate_pool:
+            cid = c.get("id")
+            if not cid or cid in exclude_ids:
+                continue
+            sc = _score_youtube_hit_for_song(
+                c,
+                req_title,
+                req_artist,
+                allow_long_mix=allow_long,
+                want_remix_or_cover=want_remix,
+                prompt_norm=prompt_norm,
+            )
+            if sc > best_cand_score:
+                best_cand_score = sc
+                best_cand = c
+
+        if best_cand is not None and best_cand_score >= 15.0:
+            item = dict(best_cand)
+            if s.get("reason"):
+                item["ai_reason"] = s["reason"]
+            return item
+
+        # 2. Search YouTube and pick the highest-scoring verified official music video
+        q = f"{req_title} {req_artist}".strip()
+        try:
+            hits = await search_youtube(q, limit=6)
+            best_hit: Optional[Dict] = None
+            best_score = -999.0
+            for h in hits:
+                vid = h.get("id")
+                if not vid or vid in exclude_ids:
+                    continue
+                sc = _score_youtube_hit_for_song(
+                    h,
+                    req_title,
+                    req_artist,
+                    allow_long_mix=allow_long,
+                    want_remix_or_cover=want_remix,
+                    prompt_norm=prompt_norm,
+                )
+                if sc > best_score:
+                    best_score = sc
+                    best_hit = h
+
+            if best_hit is not None and best_score >= 5.0:
+                item = dict(best_hit)
+                if s.get("reason"):
+                    item["ai_reason"] = s["reason"]
+                return item
+        except Exception:
+            pass
+        return None
+
+    results = await asyncio.gather(*(_lookup_one(s) for s in (raw_songs or [])[: max(limit + 2, 8)]))
+    resolved: List[Dict] = []
+    seen: Set[str] = set(exclude_ids)
+
+    # Guarantee #1: If the user typed a song/artist query that directly matched an official anchor hit
+    # (e.g. "mưa tháng 6" -> "VĂN MAI HƯƠNG - MƯA THÁNG SÁU"), pin it if not already present!
+    for item in results:
+        if item and item.get("id") and item["id"] not in seen:
+            seen.add(item["id"])
+            resolved.append(item)
+
+    if anchor_track and anchor_track.get("id") and anchor_track["id"] not in exclude_ids:
+        aid = anchor_track["id"]
+        existing_idx = next((i for i, r in enumerate(resolved) if r.get("id") == aid), -1)
+        if existing_idx > 0:
+            pinned = resolved.pop(existing_idx)
+            resolved.insert(0, pinned)
+        elif existing_idx == -1:
+            pinned = dict(anchor_track)
+            pinned.setdefault("ai_reason", f"Bản hit gốc đình đám khớp ngay với '{vibe_prompt.strip()}'")
+            resolved.insert(0, pinned)
+            seen.add(aid)
+
+    # Backfill from verified trending YouTube candidates if any LLM song was filtered out
+    if len(resolved) < limit and candidate_pool:
+        for c in candidate_pool:
+            cid = c.get("id")
+            if not cid or cid in seen:
+                continue
+            item = dict(c)
+            item.setdefault("ai_reason", "Bản hit đang thịnh hành cùng tâm trạng & màu sắc âm nhạc")
+            seen.add(cid)
+            resolved.append(item)
+            if len(resolved) >= limit:
+                break
+
+    return resolved[:limit]
+
+
+async def _handle_ai_chat_reply(room: "Room", sender_name: str, user_text: str) -> None:
+    """Background coroutine for '@Em bé floor 2' chat responses with full room & lyrics context."""
+    try:
+        await room.broadcast({"type": "ai_typing", "typing": True, "bot_name": AI_BOT_NAME})
+        lyrics_excerpt = await get_room_lyrics_excerpt(room)
+        ctx = build_room_ai_context(room, current_lyrics_excerpt=lyrics_excerpt)
+
+        ai_out = await chat_with_em_be_floor_2(ctx, sender_name, user_text)
+        reply_text = (ai_out.get("reply") or "").strip()
+        if not reply_text:
+            return
+
+        exclude_ids: Set[str] = set()
+        if room.current_track:
+            exclude_ids.add(room.current_track.id)
+        for t in room.queue:
+            exclude_ids.add(t.id)
+
+        suggested_tracks = await _resolve_ai_song_suggestions(
+            ai_out.get("suggested_songs") or [],
+            exclude_ids=exclude_ids,
+            limit=3,
+        )
+
+        async with room.lock:
+            ai_msg = {
+                "id": secrets.token_hex(4),
+                "type": "chat",
+                "is_ai": True,
+                "user_id": AI_BOT_ID,
+                "user_name": AI_BOT_NAME,
+                "user_avatar": AI_BOT_AVATAR,
+                "user_color": AI_BOT_COLOR,
+                "is_host": False,
+                "text": reply_text,
+                "media_type": None,
+                "media_url": None,
+                "suggested_tracks": suggested_tracks if suggested_tracks else None,
+                "timestamp": time.time(),
+            }
+            room.messages.append(ai_msg)
+            if len(room.messages) > 100:
+                room.messages.pop(0)
+            db.schedule_add_message(room.id, ai_msg)
+
+        await room.broadcast({"type": "chat", "message": ai_msg})
+    except Exception as exc:
+        print(f"[ai chat reply err] {exc}")
+    finally:
+        try:
+            await room.broadcast({"type": "ai_typing", "typing": False, "bot_name": AI_BOT_NAME})
+        except Exception:
+            pass
+
+
+async def _run_auto_dj_for_room(room: "Room") -> None:
+    """When Auto-DJ is ON and the room finishes its queue, automatically pick & play the next track."""
+    if room._auto_dj_busy or not room.auto_dj:
+        return
+    room._auto_dj_busy = True
+    try:
+        ctx = build_room_ai_context(room)
+        exclude_titles = [t.title for t in room.history[-12:]]
+        exclude_ids = {t.id for t in room.history[-10:]}
+        dj_res = await generate_ai_dj_playlist(
+            ctx,
+            vibe_prompt="Nối tiếp mạch cảm xúc và gu nhạc vừa phát của phòng (Auto-DJ)",
+            count=2,
+            exclude_titles=exclude_titles,
+        )
+        tracks = await _resolve_ai_song_suggestions(dj_res.get("songs") or [], exclude_ids=exclude_ids, limit=1)
+        if not tracks:
+            return
+        picked = tracks[0]
+
+        payload = None
+        async with room.lock:
+            if not room.auto_dj or room.current_track is not None or len(room.queue) > 0:
+                return
+            new_track = Track(
+                track_id=picked["id"],
+                title=picked.get("title") or f"Video {picked['id']}",
+                author=picked.get("author") or "YouTube",
+                duration=int(picked.get("duration") or 0),
+                duration_str=picked.get("duration_str") or format_duration(int(picked.get("duration") or 0)),
+                added_by_id=AI_BOT_ID,
+                added_by_name=f"🎀 {AI_BOT_NAME}",
+            )
+            room.current_track = new_track
+            room.status = "playing"
+            room.current_time = 0.0
+            room.updated_at = time.time()
+            room.ended_reports.clear()
+            room.skip_votes.clear()
+            room.state_version += 1
+
+            sys_msg = {
+                "id": secrets.token_hex(4),
+                "type": "system",
+                "text": f"🎀 {AI_BOT_NAME} (Auto-DJ) đã tự động phát: {new_track.title}",
+                "timestamp": time.time(),
+            }
+            room.messages.append(sys_msg)
+            if len(room.messages) > 100:
+                room.messages.pop(0)
+
+            payload = {
+                "type": "playback_changed",
+                "current_track": room.current_track.to_dict(),
+                "status": room.status,
+                "current_time": 0.0,
+                "updated_at": room.updated_at,
+                "server_time": room.updated_at,
+                "queue": [],
+                "history": [t.to_dict() for t in room.history[-10:]],
+                "skip_vote": room.get_skip_state(),
+                "priority_request": room.get_priority_state(),
+                "related_suggestions": get_cached_related_videos(room.current_track.id, limit=14),
+                "message": sys_msg,
+            }
+            invalidate_rooms_cache()
+            schedule_prewarm_room_related(room)
+            db.schedule_save_room(room.to_db_record())
+            db.schedule_add_message(room.id, sys_msg)
+
+        if payload:
+            await room.broadcast(payload)
+    except Exception as exc:
+        print(f"[auto-dj err] {exc}")
+    finally:
+        room._auto_dj_busy = False
+
+
+def schedule_auto_dj_if_needed(room: "Room") -> None:
+    if not room or not room.auto_dj or room.current_track is not None or len(room.queue) > 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_run_auto_dj_for_room(room))
+
+
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
     return {
@@ -739,6 +1328,7 @@ async def health_check():
         "db": db.health_info(),
         "keep_alive": get_keep_alive_status(),
         "ddos_guard": ddos_guard.stats(),
+        "ai": get_ai_stats(),
         "cache": {
             **get_youtube_cache_stats(),
             "gif_search": get_gif_cache_stats(),
@@ -1282,6 +1872,178 @@ async def api_get_lyrics(
     return JSONResponse(result, headers={"Cache-Control": "public, max-age=3600"})
 
 
+# ============================================================================
+# AI ENDPOINTS ("@Em bé floor 2" — AI DJ, Room Vibe Card, Female Radio MC TTS)
+# ============================================================================
+
+def _require_room_ai_access(
+    room_id: str,
+    x_session_token: Optional[str],
+    invite: Optional[str] = None,
+) -> Tuple["Room", Session]:
+    sess = require_session(x_session_token)
+    clean_id = room_id.strip().lower()
+    room = rooms.get(clean_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Không tìm thấy phòng nhạc")
+    if not room.is_authorized(sess.user_id, invite):
+        raise HTTPException(status_code=403, detail="Bạn không có quyền truy cập phòng riêng tư này")
+    return room, sess
+
+
+def _require_room_read_ai_access(
+    room_id: str,
+    request: Request,
+    x_session_token: Optional[str],
+    invite: Optional[str] = None,
+) -> Tuple["Room", str]:
+    """Read-only AI access (Vibe & MC Intro): enforces private room auth while surviving dev server reloads on public rooms."""
+    clean_id = room_id.strip().lower()
+    room = rooms.get(clean_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Không tìm thấy phòng nhạc")
+    sess = resolve_session(x_session_token)
+    if room.is_private:
+        if not sess:
+            raise HTTPException(status_code=401, detail="Phiên làm việc không hợp lệ hoặc đã hết hạn")
+        if not room.is_authorized(sess.user_id, invite):
+            raise HTTPException(status_code=403, detail="Bạn không có quyền truy cập phòng riêng tư này")
+        return room, sess.user_id
+    rl_key = sess.user_id if sess else get_client_ip(request.headers, request.client)
+    return room, rl_key
+
+
+@app.post("/api/rooms/{room_id}/ai/dj")
+async def api_room_ai_dj(
+    room_id: str,
+    req: AiDjRequest,
+    invite: Optional[str] = Query(default=None),
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """AI DJ playlist generator tailored to natural-language vibe + live room taste."""
+    room, sess = _require_room_ai_access(room_id, x_session_token, invite)
+    require_rate_limit(f"ai_dj:{sess.user_id}", limit=6, window_sec=60)
+
+    if room.dj_mode and not room.is_host(sess.user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Chế độ DJ đang bật: Chỉ Chủ phòng (Host) mới được dùng AI DJ thêm nhạc",
+        )
+
+    lyrics_excerpt = await get_room_lyrics_excerpt(room)
+    ctx = build_room_ai_context(room, current_lyrics_excerpt=lyrics_excerpt)
+
+    exclude_titles: List[str] = []
+    exclude_ids: Set[str] = set()
+    if room.current_track:
+        exclude_titles.append(room.current_track.title)
+        exclude_ids.add(room.current_track.id)
+    for t in room.queue:
+        exclude_titles.append(t.title)
+        exclude_ids.add(t.id)
+    for t in room.history[-10:]:
+        exclude_titles.append(t.title)
+        exclude_ids.add(t.id)
+
+    clean_prompt = sanitize_text(req.prompt, max_len=220)
+    yt_candidates, anchor_track = await _gather_ai_dj_youtube_candidates(
+        room,
+        vibe_prompt=clean_prompt,
+        exclude_ids=exclude_ids,
+    )
+
+    dj_res = await generate_ai_dj_playlist(
+        ctx,
+        vibe_prompt=clean_prompt,
+        count=req.count,
+        exclude_titles=exclude_titles,
+        youtube_candidates=yt_candidates,
+    )
+    tracks = await _resolve_ai_song_suggestions(
+        dj_res.get("songs") or [],
+        exclude_ids=exclude_ids,
+        limit=req.count,
+        vibe_prompt=clean_prompt,
+        prefetched_candidates=yt_candidates,
+        anchor_track=anchor_track,
+    )
+    return JSONResponse(
+        {
+            "bot_name": AI_BOT_NAME,
+            "vibe_note": dj_res.get("vibe_note") or "",
+            "tracks": tracks,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/rooms/{room_id}/ai/vibe")
+async def api_room_ai_vibe(
+    room_id: str,
+    request: Request,
+    invite: Optional[str] = Query(default=None),
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """Room Vibe Card: analyze the room's listening history, playing song & members."""
+    room, rl_key = _require_room_read_ai_access(room_id, request, x_session_token, invite)
+    require_rate_limit(f"ai_vibe:{rl_key}", limit=20, window_sec=60)
+
+    cur_id = room.current_track.id if room.current_track else "idle"
+    q_sig = "-".join(t.id for t in room.queue[:3])
+    h_sig = "-".join(t.id for t in room.history[-5:])
+    cache_key = f"{room.id}:{cur_id}:{q_sig}:{h_sig}:{len(room.users)}"
+
+    lyrics_excerpt = await get_room_lyrics_excerpt(room)
+    ctx = build_room_ai_context(room, current_lyrics_excerpt=lyrics_excerpt)
+    vibe = await analyze_room_vibe(ctx, cache_key=cache_key)
+    return JSONResponse(vibe, headers={"Cache-Control": "private, max-age=45"})
+
+
+@app.get("/api/rooms/{room_id}/ai/mc-intro")
+async def api_room_ai_mc_intro(
+    room_id: str,
+    request: Request,
+    invite: Optional[str] = Query(default=None),
+    track_uid: Optional[str] = Query(default=None, max_length=64),
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """Generate & return cached expressive female Vietnamese Radio MC intro for the current track."""
+    room, rl_key = _require_room_read_ai_access(room_id, request, x_session_token, invite)
+    require_rate_limit(f"ai_mc:{rl_key}", limit=25, window_sec=60)
+    no_store = {"Cache-Control": "no-store"}
+
+    if not room.mc_enabled or not room.current_track:
+        return JSONResponse({"found": False, "script": "", "audio_url": None}, headers=no_store)
+
+    track = room.current_track
+    # Client asked for a track that is no longer playing (fast skip) -> don't introduce the wrong song
+    if track_uid and track_uid not in (track.uid, track.id):
+        return JSONResponse({"found": False, "stale": True, "script": "", "audio_url": None}, headers=no_store)
+
+    intro = await get_or_create_mc_intro(room.id, track.to_dict(), build_mc_context(room, track))
+    # Track may have changed while the intro was being generated
+    if room.current_track is not track:
+        return JSONResponse({"found": False, "stale": True, "script": "", "audio_url": None}, headers=no_store)
+    return JSONResponse({"found": True, **intro}, headers=no_store)
+
+
+@app.get("/api/ai/mc-audio/{audio_id}")
+async def api_serve_mc_audio(audio_id: str, request: Request):
+    """Serve cached Vietnamese female Radio MC MP3 audio."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"mc_audio:{ip}", limit=30, window_sec=60)
+    if not re.match(r"^[a-f0-9]{16}$", audio_id or ""):
+        raise HTTPException(status_code=404, detail="Mã âm thanh MC không hợp lệ")
+    audio_bytes = mc_audio_cache.get(audio_id)
+    if not audio_bytes:
+        raise HTTPException(status_code=404, detail="Bản thu âm MC đã hết hạn")
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "public, max-age=1800"},
+    )
+
+
 @app.post("/api/chat/upload")
 async def api_upload_chat_image(
     request: Request,
@@ -1549,6 +2311,17 @@ async def websocket_room_endpoint(
                     db.schedule_add_message(room.id, msg)
 
                 await room.broadcast({"type": "chat", "message": msg})
+
+                # Trigger "@Em bé floor 2" conversational AI reply when tagged in chat!
+                if text and is_ai_mention(text):
+                    ai_ok, _ = rate_limiter.allow(f"ai_chat:{user_id}", limit=8, window_sec=60)
+                    if ai_ok:
+                        asyncio.create_task(_handle_ai_chat_reply(room, current_user.name, text))
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Bạn gọi @{AI_BOT_NAME} hơi nhanh, chờ vài giây để Em bé thở xíu nhé!",
+                        })
 
             # ----------------------------------------------------------------
             # 3. EMOJI REACTION (ALLOWLISTED & RATE-LIMITED)
@@ -1884,6 +2657,8 @@ async def websocket_room_endpoint(
 
                 if payload:
                     await room.broadcast(payload)
+                    if payload.get("current_track") is None:
+                        schedule_auto_dj_if_needed(room)
 
             # ----------------------------------------------------------------
             # 9. SONG PRIORITY REQUEST & MAJORITY VOTE (>= 50% OF MEMBERS)
@@ -2115,6 +2890,71 @@ async def websocket_room_endpoint(
                     await websocket.send_json({"type": "error", "message": err_msg})
                 elif payload:
                     await room.broadcast(payload)
+                    if payload.get("type") == "playback_changed" and payload.get("current_track") is None:
+                        schedule_auto_dj_if_needed(room)
+
+            # ----------------------------------------------------------------
+            # 11B. TOGGLE AI AUTO-DJ (HOST ONLY)
+            # ----------------------------------------------------------------
+            elif action == "toggle_auto_dj":
+                async with room.lock:
+                    if not room.is_host(user_id):
+                        await websocket.send_json({"type": "error", "message": "Chỉ Chủ phòng (Host) mới được bật/tắt Auto-DJ"})
+                        continue
+                    room.auto_dj = not room.auto_dj
+                    mode_text = (
+                        f"BẬT ({AI_BOT_NAME} sẽ tự nối nhạc hợp gu khi hết hàng đợi)"
+                        if room.auto_dj
+                        else "TẮT"
+                    )
+                    sys_msg = {
+                        "id": secrets.token_hex(4),
+                        "type": "system",
+                        "text": f"🎀 Auto-DJ đã {mode_text}",
+                        "timestamp": time.time(),
+                    }
+                    room.messages.append(sys_msg)
+                    if len(room.messages) > 100:
+                        room.messages.pop(0)
+                    payload = {
+                        "type": "auto_dj_changed",
+                        "auto_dj": room.auto_dj,
+                        "message": sys_msg,
+                    }
+                    db.schedule_add_message(room.id, sys_msg)
+
+                await room.broadcast(payload)
+                if room.auto_dj and room.current_track is None and len(room.queue) == 0:
+                    schedule_auto_dj_if_needed(room)
+
+            # ----------------------------------------------------------------
+            # 11C. TOGGLE AI FEMALE RADIO MC (HOST ONLY, DEFAULT OFF)
+            # ----------------------------------------------------------------
+            elif action == "toggle_mc_mode":
+                async with room.lock:
+                    if not room.is_host(user_id):
+                        await websocket.send_json({"type": "error", "message": "Chỉ Chủ phòng (Host) mới được bật/tắt MC Radio"})
+                        continue
+                    room.mc_enabled = not room.mc_enabled
+                    mode_text = f"BẬT (Nữ MC {AI_BOT_NAME} sẽ dẫn chuyện khi chuyển bài)" if room.mc_enabled else "TẮT"
+                    sys_msg = {
+                        "id": secrets.token_hex(4),
+                        "type": "system",
+                        "text": f"🎙️ MC Radio đã {mode_text}",
+                        "timestamp": time.time(),
+                    }
+                    room.messages.append(sys_msg)
+                    if len(room.messages) > 100:
+                        room.messages.pop(0)
+                    payload = {
+                        "type": "mc_mode_changed",
+                        "mc_enabled": room.mc_enabled,
+                        "message": sys_msg,
+                    }
+                    schedule_prewarm_room_related(room)
+                    db.schedule_add_message(room.id, sys_msg)
+
+                await room.broadcast(payload)
 
             # ----------------------------------------------------------------
             # 11. TOGGLE DJ MODE (HOST ONLY + LOCKED)

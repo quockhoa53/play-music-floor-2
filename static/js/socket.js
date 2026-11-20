@@ -224,6 +224,14 @@ class RoomSocket {
         this.send('toggle_dj_mode');
     }
 
+    toggleAutoDj() {
+        this.send('toggle_auto_dj');
+    }
+
+    toggleMcMode() {
+        this.send('toggle_mc_mode');
+    }
+
     disconnect() {
         this.manualClose = true;
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);

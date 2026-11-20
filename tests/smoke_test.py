@@ -1183,6 +1183,151 @@ def test_sync_clock_no_double_count_and_local_only_playback():
     print("[OK] Room sync clock (no double-count), Host Master control & Member local-only isolation")
 
 
+def test_ai_em_be_floor_2_rotator_context_and_endpoints():
+    from services.ai import (
+        AI_BOT_NAME,
+        GroqKeyRotator,
+        build_room_ai_context,
+        extract_lyrics_excerpt,
+        is_ai_mention,
+        mc_audio_cache,
+        mc_intro_cache,
+        strip_ai_mention,
+        vibe_cache,
+    )
+
+    # 1. Verify 2-key round-robin alternation & 429 cooldown failover
+    rot = GroqKeyRotator()
+    rot._keys = ["gsk_test_key_alpha_111", "gsk_test_key_beta_222"]
+    rot._loaded = True
+    o1 = rot.next_order()
+    o2 = rot.next_order()
+    assert o1[0][0] == 0 and o2[0][0] == 1, f"Keys did not alternate round-robin: {o1} -> {o2}"
+    rot.mark_rate_limited(0, retry_after=30.0)
+    o3 = rot.next_order()
+    assert o3[0][0] == 1, "Rate-limited key #0 must be deferred behind healthy key #1!"
+
+    # 2. Verify '@Em bé floor 2' mention detection, stripping & Vietnamese music query normalization / filtering
+    assert is_ai_mention("@Em bé floor 2 gợi ý nhạc buồn đi")
+    assert is_ai_mention("Ê @em be floor 2 hôm nay trời mưa quá")
+    assert is_ai_mention("@embefloor2 kể chuyện vui đi")
+    assert not is_ai_mention("Hôm nay nghe nhạc ở floor 2 vui quá")
+    assert strip_ai_mention("@Em bé floor 2 gợi ý 3 bài chill") == "gợi ý 3 bài chill"
+
+    from main import _normalize_vn_music_text, _is_valid_music_track, _score_youtube_hit_for_song
+    assert _normalize_vn_music_text("mưa tháng 6") == _normalize_vn_music_text("MƯA THÁNG SÁU")
+    assert _normalize_vn_music_text("Tháng Tư Là Lời Nói Dối Của Em") == "thang 4 la loi noi doi cua em"
+    # Reject 48s Interlude & 23m non-music video
+    assert not _is_valid_music_track({"id": "abc12345678", "title": "WREN EVANS - mưa chưa tạnh (Interlude)", "author": "Wren Evans", "duration": 48})
+    assert not _is_valid_music_track({"id": "def12345678", "title": "Tuyển tập các bài chia sẻ tu luyện Chính Pháp", "author": "Câu Chuyện", "duration": 1394})
+    # Official MV of Mưa Tháng Sáu scores high for query "mưa tháng 6"
+    vmh_hit = {
+        "id": "_8vekzCF04Q",
+        "title": "VĂN MAI HƯƠNG - MƯA THÁNG SÁU (feat. GREY D, TRUNG QUÂN) [prod. by HỨA KIM TUYỀN]",
+        "author": "VĂN MAI HƯƠNG OFFICIAL",
+        "duration": 274,
+    }
+    assert _score_youtube_hit_for_song(vmh_hit, "mưa tháng 6", "Văn Mai Hương") >= 20.0
+
+    # 3. Verify deep room context includes room info, current track + lyrics, queue, member taste & chat
+    client = TestClient(app)
+    rate_limiter._buckets.clear()
+    ddos_guard.reset()
+
+    tok_h, uid_h = _new_session(client)
+    tok_m, uid_m = _new_session(client)
+    cr = client.post("/api/rooms", headers={"X-Session-Token": tok_h}, json={"name": "Phòng AI Chill"})
+    rid = cr.json()["room_id"]
+    room = rooms[rid]
+
+    room.host_id = uid_h
+    room.users[uid_h] = User(uid_h, "Khoa Host", "👑", "#4f46e5")
+    room.users[uid_m] = User(uid_m, "Mèo Con 83", "🐱", "#ec4899")
+    room.current_track = Track("FN7ALfpGxiI", "Nơi Này Có Anh", "Sơn Tùng M-TP", 278, "04:38", uid_h, "Khoa Host")
+    room.queue = [Track("AmduqflT79M", "Yêu Một Người Có Lẽ", "Lou Hoàng - Miu Lê", 264, "04:24", uid_m, "Mèo Con 83")]
+    room.messages.append({"id": "m1", "type": "chat", "user_name": "Mèo Con 83", "text": "Bài này nghe hoài không chán"})
+
+    excerpt = extract_lyrics_excerpt({"found": True, "lines": [{"time": 29.8, "text": "Em là ai từ đâu bước đến nơi đây"}]})
+    ctx = build_room_ai_context(room, current_lyrics_excerpt=excerpt)
+    assert "Phòng AI Chill" in ctx
+    assert "Nơi Này Có Anh" in ctx
+    assert "Em là ai từ đâu bước đến nơi đây" in ctx
+    assert "Yêu Một Người Có Lẽ" in ctx
+    assert "Mèo Con 83" in ctx and "Khoa Host" in ctx
+    assert "Bài này nghe hoài không chán" in ctx
+
+    # 4. Verify Vibe, MC Intro & MC Audio endpoints (using pre-seeded cache so test runs 100% offline)
+    cur_id = room.current_track.id
+    q_sig = "-".join(t.id for t in room.queue[:3])
+    h_sig = "-".join(t.id for t in room.history[-5:])
+    v_key = f"{room.id}:{cur_id}:{q_sig}:{h_sig}:{len(room.users)}"
+    vibe_cache.set(v_key, {
+        "emoji": "🌙",
+        "title": "Đêm V-Pop Ngọt Ngào",
+        "genres": [{"name": "V-Pop", "pct": 70}, {"name": "R&B", "pct": 30}],
+        "summary": "Khoa Host và Mèo Con 83 đang cùng chill với những bản hit V-Pop lãng mạn.",
+    })
+    rv = client.get(f"/api/rooms/{rid}/ai/vibe", headers={"X-Session-Token": tok_h})
+    assert rv.status_code == 200 and rv.json()["title"] == "Đêm V-Pop Ngọt Ngào"
+
+    mc_audio_cache.set("a1b2c3d4e5f60718", b"ID3_FAKE_MP3_BYTES_FOR_TEST")
+    mc_intro_cache.set(f"{rid}:{room.current_track.uid}", {
+        "track_uid": room.current_track.uid,
+        "script": "Chào cả phòng, cùng lắng nghe Nơi Này Có Anh do Khoa Host yêu cầu nhé!",
+        "audio_url": "/api/ai/mc-audio/a1b2c3d4e5f60718",
+        "voice": "vi-VN-HoaiMyNeural",
+    })
+    # Default mc_enabled is False -> mc-intro returns found=False
+    assert room.mc_enabled is False
+    rmc_off = client.get(f"/api/rooms/{rid}/ai/mc-intro", headers={"X-Session-Token": tok_h})
+    assert rmc_off.status_code == 200 and rmc_off.json()["found"] is False
+
+    # 5. Verify DJ Mode blocks non-Host from AI DJ endpoint & WS toggle_mc_mode / toggle_auto_dj are strictly Host-only
+    room.dj_mode = True
+    rdj_forbidden = client.post(
+        f"/api/rooms/{rid}/ai/dj",
+        headers={"X-Session-Token": tok_m},
+        json={"prompt": "nhạc chill", "count": 3},
+    )
+    assert rdj_forbidden.status_code == 403
+
+    with client.websocket_connect(f"/ws/{rid}?token={tok_h}") as ws_h:
+        ws_h.send_json({"action": "join", "name": "Khoa Host"})
+        ws_h.receive_json()
+        ws_h.receive_json()
+
+        with client.websocket_connect(f"/ws/{rid}?token={tok_m}") as ws_m:
+            ws_m.send_json({"action": "join", "name": "Mèo Con 83"})
+            ws_m.receive_json()
+            ws_m.receive_json()
+            ws_h.receive_json()  # host gets user_joined for member
+
+            # Non-host cannot toggle MC mode
+            ws_m.send_json({"action": "toggle_mc_mode"})
+            err_mc = ws_m.receive_json()
+            assert err_mc["type"] == "error" and room.mc_enabled is False
+
+            # Host enables MC mode -> broadcasts mc_mode_changed with mc_enabled=True
+            ws_h.send_json({"action": "toggle_mc_mode"})
+            mc_h = ws_h.receive_json()
+            mc_m = ws_m.receive_json()
+            assert mc_h["type"] == "mc_mode_changed" and mc_h["mc_enabled"] is True and room.mc_enabled is True
+            assert mc_m["type"] == "mc_mode_changed" and mc_m["mc_enabled"] is True
+
+            # Now that Host enabled MC mode, mc-intro returns found=True
+            rmc_on = client.get(f"/api/rooms/{rid}/ai/mc-intro", headers={"X-Session-Token": tok_h})
+            assert rmc_on.status_code == 200 and rmc_on.json()["found"] is True
+            raud = client.get("/api/ai/mc-audio/a1b2c3d4e5f60718")
+            assert raud.status_code == 200 and raud.headers["content-type"].startswith("audio/mpeg")
+
+            ws_h.send_json({"action": "toggle_auto_dj"})
+            adj = ws_h.receive_json()
+            ws_m.receive_json()
+            assert adj["type"] == "auto_dj_changed" and adj["auto_dj"] is True and room.auto_dj is True
+
+    print(f"[OK] AI '{AI_BOT_NAME}' 2-key rotator, deep room+lyrics+taste context, Vibe, Host-only MC TTS & Auto-DJ")
+
+
 if __name__ == "__main__":
     try:
         rate_limiter._buckets.clear()
@@ -1202,6 +1347,7 @@ if __name__ == "__main__":
         test_lyrics_parser_cleaner_and_endpoint()
         test_diverse_room_history_suggestions()
         test_sync_clock_no_double_count_and_local_only_playback()
+        test_ai_em_be_floor_2_rotator_context_and_endpoints()
         print("ALL TESTS PASSED!")
     finally:
         db.close()
