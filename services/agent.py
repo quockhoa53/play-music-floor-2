@@ -284,7 +284,8 @@ INTENT_PATTERNS: Dict[str, re.Pattern] = {
         r"(gợi ý|đề xuất|recommend|tìm (bài|nhạc|giúp|giùm)|kiếm (bài|nhạc)|nghe gì|bài (gì|nào)|nhạc (gì|nào|để|cho|hợp|buồn|vui|chill|"
         r"sôi động|rap|kpop|us|âu mỹ|indie|ballad|edm|lofi|tập trung|học|code|ngủ|tâm trạng)|playlist|hợp gu|giống (bài|giống)|"
         r"đang hot|đang trending|thịnh hành|top (bài|hit)|bài (mới|hot)|cho (tui|mình|anh|em|tôi) (vài|mấy|xin) bài|xin (vài|mấy) bài|"
-        r"rap (gì|nào|cực|hay)|kpop (gì|nào|sôi))",
+        r"rap (gì|nào|cực|hay)|kpop (gì|nào|sôi)|(bài|bài hát|ca khúc|mv) (nào|gì)|(bài|ca khúc|bài hát) (hay|nổi|hot|hit) nhất|"
+        r"hay nhất|nổi (tiếng )?nhất|hit (nào|gì|của)|bài (của|mới của)|có bài nào|nghe bài)",
         re.IGNORECASE,
     ),
     "add": re.compile(
@@ -293,11 +294,13 @@ INTENT_PATTERNS: Dict[str, re.Pattern] = {
     ),
     "facts": re.compile(
         r"(năm nào|ra năm|phát hành|ra mắt|ai hát|ai sáng tác|sáng tác|nhạc sĩ|album nào|thuộc album|giải thưởng|giải gì|kỷ lục|"
-        r"confirm|xác nhận|ai đúng|ai sai|đúng không|phải không|có phải|kiểm chứng|tiểu sử|bao nhiêu tuổi|sinh năm|quê ở|thật không)",
+        r"confirm|xác nhận|ai đúng|ai sai|đúng không|phải không|có phải|kiểm chứng|tiểu sử|bao nhiêu tuổi|sinh năm|quê ở|thật không|"
+        r"thông tin|là ai|là người|giới thiệu về|kể về|biết gì về|sự nghiệp|nổi tiếng nhờ|tên thật|chiều cao)",
         re.IGNORECASE,
     ),
     "drama": re.compile(
-        r"(drama|scandal|phốt|lùm xùm|ồn ào|bê bối|tranh cãi|thị phi|đời tư|hẹn hò|chia tay|kiện tụng|lừa đảo|ầm ĩ|bóc phốt)",
+        r"(drama|scandal|phốt|lùm xùm|ồn ào|bê bối|tranh cãi|thị phi|đời tư|hẹn hò|chia tay|kiện tụng|lừa đảo|ầm ĩ|bóc phốt|"
+        r"có vợ|có chồng|vợ (là|của)|chồng (là|của)|lấy vợ|lấy chồng|kết hôn|cưới|người yêu|bạn gái|bạn trai|yêu ai|độc thân|con cái|có con)",
         re.IGNORECASE,
     ),
     "lyrics": re.compile(
@@ -310,7 +313,7 @@ INTENT_PATTERNS: Dict[str, re.Pattern] = {
 TOOLS_BY_INTENT: Dict[str, set] = {
     "music": {"search_songs", "get_trending_songs", "get_related_songs"},
     "add": {"search_songs", "add_song_to_queue"},
-    "facts": {"lookup_music_facts", "search_songs"},
+    "facts": {"lookup_music_facts", "lookup_artist_drama", "search_songs"},
     "drama": {"lookup_artist_drama", "lookup_music_facts"},
     "lyrics": {"get_song_lyrics", "search_songs"},
     "memory": {"remember_fact", "forget_my_memory"},
@@ -318,12 +321,29 @@ TOOLS_BY_INTENT: Dict[str, set] = {
 }
 
 
-def detect_intents(text: str) -> set:
-    """Which tool families a message needs ('' set = plain chat, no agent needed)."""
-    t = text or ""
+# A question that names someone / something (capitalized word not at the start, e.g. 'Quân AP', 'Sơn Tùng')
+# is almost always an information request -> worth the agent's lookup tools.
+_PROPER_NOUN_RE = re.compile(r"(?<!^)(?<![.!?]\s)\b[A-ZĐÂĂÊÔƠƯÁÀẢÃẠÉÈẺẼẸÍÌỈĨỊÓÒỎÕỌÚÙỦŨỤÝỲỶỸỴ][\w'.-]+")
+_QUESTION_RE = re.compile(r"\?|\b(gì|nào|sao|ai|không|chưa|hả|nhỉ|vậy|thế)\s*[?!.]*\s*$", re.IGNORECASE)
+
+
+def detect_intents(text: str, ignore_names: Optional[List[str]] = None) -> set:
+    """Which tool families a message needs ('' set = plain chat, no agent needed).
+
+    `ignore_names`: room members' display names, so 'nãy Thỏ nói gì' is not mistaken for a question
+    about an artist just because the name is capitalized.
+    """
+    t = (text or "").strip()
     found = {name for name, pat in INTENT_PATTERNS.items() if pat.search(t)}
     if is_fact_check_request(t):
         found.add("facts")
+    if not found and _QUESTION_RE.search(t):
+        probe = t
+        for n in sorted((ignore_names or []), key=len, reverse=True):
+            if n:
+                probe = re.sub(re.escape(n), " ", probe, flags=re.IGNORECASE)
+        if _PROPER_NOUN_RE.search(probe):
+            found |= {"facts", "music"}
     return found
 
 

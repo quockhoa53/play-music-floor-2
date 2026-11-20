@@ -2471,6 +2471,31 @@ function initChatRichMedia() {
     });
     document.getElementById('btn-close-sticker-picker')?.addEventListener('click', closeAllPopovers);
 
+    // Combined 😊 button: opens the last used tab (Nhãn dán / GIF); tabs switch between the two pickers
+    const MEDIA_TAB_KEY = 'floor2_media_tab';
+    const lastMediaTab = () => {
+        try { return localStorage.getItem(MEDIA_TAB_KEY) === 'gif' ? 'gif' : 'sticker'; } catch (_) { return 'sticker'; }
+    };
+    const openMediaTab = (tab) => {
+        try { localStorage.setItem(MEDIA_TAB_KEY, tab); } catch (_) {}
+        const target = tab === 'gif' ? gifPopover : stickerPopover;
+        if (target && target.classList.contains('hidden')) {
+            (tab === 'gif' ? gifBtn : stickerBtn)?.click();
+        }
+    };
+    document.getElementById('btn-toggle-media-picker')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const anyOpen = !stickerPopover?.classList.contains('hidden') || !gifPopover?.classList.contains('hidden');
+        if (anyOpen) { closeAllPopovers(); return; }
+        openMediaTab(lastMediaTab());
+    });
+    document.querySelectorAll('.js-media-tab').forEach(tabBtn => {
+        tabBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openMediaTab(tabBtn.getAttribute('data-tab') === 'gif' ? 'gif' : 'sticker');
+        });
+    });
+
     stickerInput?.addEventListener('input', () => {
         if (stickerSearchTimer) clearTimeout(stickerSearchTimer);
         stickerSearchTimer = setTimeout(() => {

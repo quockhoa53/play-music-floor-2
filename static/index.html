@@ -810,6 +810,10 @@
 
                     <!-- ANIMATED STICKER (NHÃN DÁN) PICKER POPOVER (Never clips vertically!) -->
                     <div id="sticker-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[106px] max-h-[calc(100%-116px)] flex flex-col surface-dropdown rounded-2xl p-3 z-50">
+                        <div class="flex items-center gap-1 p-1 mb-2 rounded-full surface-subtle flex-shrink-0" role="tablist">
+                            <button type="button" role="tab" class="js-media-tab flex-1 py-1 rounded-full text-[11.5px] font-bold transition bg-indigo-500 text-white shadow-sm" data-tab="sticker" aria-selected="true">😊 Nhãn dán</button>
+                            <button type="button" role="tab" class="js-media-tab flex-1 py-1 rounded-full text-[11.5px] font-extrabold transition text-sub hover:text-main" data-tab="gif" aria-selected="false">GIF</button>
+                        </div>
                         <div class="flex items-center gap-2 mb-2 flex-shrink-0">
                             <div class="relative flex-1">
                                 <input type="text" id="sticker-search-input" autocomplete="off"
@@ -837,6 +841,10 @@
 
                     <!-- GIF PICKER POPOVER (Never clips vertically!) -->
                     <div id="gif-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[106px] max-h-[calc(100%-116px)] flex flex-col surface-dropdown rounded-2xl p-3 z-50">
+                        <div class="flex items-center gap-1 p-1 mb-2 rounded-full surface-subtle flex-shrink-0" role="tablist">
+                            <button type="button" role="tab" class="js-media-tab flex-1 py-1 rounded-full text-[11.5px] font-bold transition text-sub hover:text-main" data-tab="sticker" aria-selected="false">😊 Nhãn dán</button>
+                            <button type="button" role="tab" class="js-media-tab flex-1 py-1 rounded-full text-[11.5px] font-extrabold transition bg-indigo-500 text-white shadow-sm" data-tab="gif" aria-selected="true">GIF</button>
+                        </div>
                         <div class="flex items-center gap-2 mb-2 flex-shrink-0">
                             <div class="relative flex-1">
                                 <input type="text" id="gif-search-input" autocomplete="off"
@@ -904,11 +912,14 @@
                     <form id="chat-input-form" class="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-theme flex-shrink-0">
                         <input type="file" id="chat-image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
                         <div class="flex items-center gap-1.5">
-                            <!-- Media Buttons (Sticker + GIF + Image Upload) -->
-                            <button type="button" id="btn-toggle-sticker-picker" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-sub hover:text-indigo-500 flex-shrink-0" title="Gửi Nhãn dán động">
+                            <!-- Media Buttons: one combined Sticker + GIF picker, then Image Upload -->
+                            <button type="button" id="btn-toggle-media-picker" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-sub hover:text-indigo-500 flex-shrink-0" title="Nhãn dán & GIF" aria-label="Nhãn dán và GIF">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             </button>
-                            <button type="button" id="btn-toggle-gif-picker" class="surface-subtle h-9 px-2 rounded-full flex items-center justify-center text-[11px] font-extrabold tracking-tight text-indigo-600 dark:text-indigo-400 flex-shrink-0" title="Gửi ảnh GIF động">
+                            <button type="button" id="btn-toggle-sticker-picker" class="hidden" tabindex="-1" aria-hidden="true" title="Gửi Nhãn dán động">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            </button>
+                            <button type="button" id="btn-toggle-gif-picker" class="hidden" tabindex="-1" aria-hidden="true" title="Gửi ảnh GIF động">
                                 GIF
                             </button>
                             <button type="button" id="btn-chat-upload-image" class="surface-subtle w-9 h-9 rounded-full flex items-center justify-center text-sub hover:text-indigo-500 flex-shrink-0" title="Gửi hình ảnh (hoặc dán Ctrl+V)">

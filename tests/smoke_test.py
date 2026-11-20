@@ -1889,7 +1889,11 @@ def test_agent_routing_and_quota_cooldown():
     assert detect_intents("câu đầu bài đang phát nghĩa là gì") == {"lyrics"}
     assert detect_intents("mở giùm bài Bigcityboi") == {"add"}
     for chat in ("hôm nay ăn gì ta", "nãy Thỏ nói gì nhỉ", "chào em nha", "kể chuyện cười đi"):
-        assert detect_intents(chat) == set(), chat
+        assert detect_intents(chat, ["Gấu", "Mèo", "Thỏ"]) == set(), chat
+    # Real messages that used to be misrouted to plain chat (no tools -> made-up answers)
+    assert detect_intents("bài hát nào của Quân AP hay nhất") == {"music"}
+    assert detect_intents("Quân AP có vợ chưa?") == {"drama"}
+    assert "facts" in detect_intents("thông tin về Quân AP")
     assert "add_song_to_queue" not in tools_for_intents({"music"})
 
     room = M.Room("route1", "Route Room", host_id="u1")

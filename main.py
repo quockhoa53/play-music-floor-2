@@ -1860,8 +1860,8 @@ async def _legacy_ai_chat_reply(
         mood_hint=mood_hint,
     )
     reply_text = (ai_out.get("reply") or "").strip()
-    if not reply_text:
-        return "", []
+    if not reply_text or ai_out.get("failed"):
+        return "", []  # caller decides: try the agent, else apologise
 
     raw_songs = list(ai_out.get("suggested_songs") or [])
     mood = ai_out.get("mood") or mood_hint
@@ -1939,7 +1939,7 @@ async def _handle_ai_chat_reply(
 
         reply_text, suggested_tracks = "", []
         # Route: only requests that need tools use the quota-limited gpt-oss agent; plain chat -> Qwen
-        intents = detect_intents(strip_ai_mention(user_text))
+        intents = detect_intents(strip_ai_mention(user_text), [u.name for u in room.users.values()])
         agent_cooling = time.time() < _agent_cooldown["until"]
         use_agent = AI_AGENT_ENABLED and bool(intents) and not agent_cooling
         telemetry.incr("route.agent" if use_agent else ("route.cooldown" if agent_cooling and intents else "route.chat"))
@@ -1970,6 +1970,24 @@ async def _handle_ai_chat_reply(
             reply_text, suggested_tracks = await _legacy_ai_chat_reply(
                 room, sender_name, user_text, digest, exclude_ids, avoid_titles
             )
+        # Plain-chat route failed (Qwen over quota): the agent models have separate quotas, use them
+        if not reply_text and not use_agent and AI_AGENT_ENABLED and not agent_cooling:
+            telemetry.incr("route.chat_failed_to_agent")
+            try:
+                reply_text, suggested_tracks = await asyncio.wait_for(
+                    _agent_ai_chat_reply(
+                        room, sender_name, sender_id, user_text, digest, exclude_ids, avoid_titles, stream,
+                        allow_actions=allow_actions, security_note=security_note, intents=intents or None,
+                    ),
+                    timeout=45.0,
+                )
+                if reply_text:
+                    path = "agent"
+            except (AgentUnavailable, asyncio.TimeoutError) as exc:
+                fallback_reason = f"chat+agent failed: {type(exc).__name__}: {str(exc)[:120]}"
+        if not reply_text:
+            reply_text = f"Ủa {sender_name} ơi, Em bé đang hơi quá tải xíu 🥺 Bạn gọi lại mình sau 1 phút nhé!"
+            path = "failed"
             if reply_text:
                 path = "legacy" if use_agent or (intents and not agent_cooling) else ("cooldown" if agent_cooling and intents else "chat")
         if not reply_text:

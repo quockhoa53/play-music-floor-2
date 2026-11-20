@@ -25,6 +25,7 @@ AI_BOT_COLOR = "#ec4899"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 PRIMARY_MODEL = "qwen/qwen3.8-27b"
 FALLBACK_MODEL = "openai/gpt-oss-120b"
+SECOND_FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 # Mention matcher for "@Em bé floor 2" (case/accent-insensitive + handy shortcuts)
 AI_MENTION_RE = re.compile(
@@ -205,7 +206,8 @@ async def groq_chat(
     if not order:
         return None
 
-    models_to_try = [model] if model else [PRIMARY_MODEL, FALLBACK_MODEL]
+    # Quotas are per model: qwen -> gpt-oss-120b -> gpt-oss-20b before giving up
+    models_to_try = [model] if model else [PRIMARY_MODEL, FALLBACK_MODEL, SECOND_FALLBACK_MODEL]
     client = _get_groq_client()
     # json_mode: Groq rejects output that is not valid JSON (400 json_validate_failed) but returns the text the
     # model wrote. Keep it so callers can still salvage a usable reply if every attempt fails.
@@ -1223,6 +1225,7 @@ async def chat_with_em_be_floor_2(
         "suggested_songs": [],
         "picked_tracks": [],
         "mood": "",
+        "failed": True,
     }
 
 
