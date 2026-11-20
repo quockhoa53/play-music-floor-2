@@ -805,3 +805,12 @@ html:not(.dark) .radio-deck {
   }
 }
 
+
+/* "@Em bé floor 2" formatted replies (paragraphs, lists, bold) */
+.ai-rich > * + * { margin-top: 0.45rem; }
+.ai-rich p { margin: 0; }
+.ai-rich .ai-list { margin: 0; padding-left: 1.15rem; }
+.ai-rich .ai-list-ul { list-style: disc; }
+.ai-rich .ai-list-ol { list-style: decimal; }
+.ai-rich .ai-list li { margin: 0.15rem 0; padding-left: 0.1rem; }
+.ai-rich .ai-list li::marker { color: #ec4899; font-weight: 800; }

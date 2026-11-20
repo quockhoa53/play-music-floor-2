@@ -53,6 +53,9 @@ yt_search_cache: TTLCache[List[Dict[str, Any]]] = TTLCache("yt_search", max_size
 yt_info_cache: TTLCache[Dict[str, Any]] = TTLCache("yt_info", max_size=500, default_ttl=3600)
 yt_audio_cache: TTLCache[Tuple[str, str]] = TTLCache("yt_audio", max_size=200, default_ttl=1800)
 yt_related_cache: TTLCache[List[Dict[str, Any]]] = TTLCache("yt_related", max_size=300, default_ttl=1800)
+# Negative cache: video_id -> unix time until which a failed related fetch is not retried
+_related_fail_until: Dict[str, float] = {}
+RELATED_FAIL_COOLDOWN_SEC = 90.0
 
 # In-flight request deduplication: cache_key -> asyncio.Task
 _inflight_searches: Dict[str, asyncio.Task] = {}
@@ -616,7 +619,7 @@ async def _fetch_related_innertube(video_id: str, limit: int = 20) -> List[Dict[
                 "playlistId": f"RD{video_id}",
             },
             MWEB_HEADERS,
-            4.0,
+            8.0,
         ),
         (
             "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
@@ -633,18 +636,32 @@ async def _fetch_related_innertube(video_id: str, limit: int = 20) -> List[Dict[
                 "playlistId": f"RD{video_id}",
             },
             WEB_HEADERS,
-            5.0,
+            10.0,
         ),
     ]
     for url, payload, hdrs, timeout_sec in endpoints:
+        client_name = payload["context"]["client"]["clientName"]
+        t0 = time.monotonic()
         try:
-            resp = await client.post(url, json=payload, headers=hdrs, timeout=timeout_sec)
+            resp = await client.post(
+                url,
+                json=payload,
+                headers=hdrs,
+                timeout=httpx.Timeout(timeout_sec, connect=4.0),
+            )
             if resp.status_code == 200:
                 parsed = _extract_related_from_next_json(resp.json(), video_id, limit=limit)
                 if parsed:
                     return parsed
+                print(f"[youtube related] {client_name} {video_id}: 200 but no related items parsed")
+            else:
+                print(f"[youtube related] {client_name} {video_id}: HTTP {resp.status_code}")
         except Exception as e:
-            print(f"[youtube related fetch error] {e}")
+            # httpx timeouts have an empty str(); always log the exception type + elapsed time
+            print(
+                f"[youtube related fetch error] {client_name} {video_id}: "
+                f"{type(e).__name__} {e!s} after {time.monotonic() - t0:.1f}s"
+            )
     return []
 
 
@@ -669,6 +686,10 @@ async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, A
     if cached is not None:
         return cached[:limit]
 
+    # Recently failed: don't hammer YouTube again for every client in the room
+    if _related_fail_until.get(clean_id, 0.0) > time.time():
+        return []
+
     existing = _inflight_related.get(clean_id)
     if existing and not existing.done():
         try:
@@ -685,7 +706,14 @@ async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, A
         if _inflight_related.get(clean_id) is task:
             _inflight_related.pop(clean_id, None)
 
-    if items:
+    if not items:
+        if len(_related_fail_until) > 500:
+            now = time.time()
+            for k in [k for k, v in _related_fail_until.items() if v <= now]:
+                _related_fail_until.pop(k, None)
+        _related_fail_until[clean_id] = time.time() + RELATED_FAIL_COOLDOWN_SEC
+    else:
+        _related_fail_until.pop(clean_id, None)
         yt_related_cache.set(clean_id, items)
         for it in items:
             vid = it.get("id")

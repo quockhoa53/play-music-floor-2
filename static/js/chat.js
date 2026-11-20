@@ -153,7 +153,7 @@ class RoomChat {
                                 ? 'chat-bubble-other rounded-bl-sm ring-1 ring-pink-500/35 bg-gradient-to-br from-pink-500/10 via-violet-500/10 to-indigo-500/5'
                                 : 'chat-bubble-other rounded-bl-sm')
                     }">
-                        ${this.formatMessageWithMentions(msg.text, isMe)}
+                        ${isAi ? this.formatAiMessage(msg.text) : this.formatMessageWithMentions(msg.text, isMe)}
                     </div>
                 `;
             }
@@ -442,6 +442,52 @@ class RoomChat {
             }
             return `<strong class="font-extrabold px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-600 dark:text-indigo-300">${match}</strong>`;
         });
+    }
+
+    /**
+     * Safe mini-markdown for "@Em bé floor 2" replies: paragraphs, line breaks, "-"/"•" bullets,
+     * "1." numbered lists, **bold** and *italic*. Text is HTML-escaped first, so no injection is possible.
+     */
+    formatAiMessage(rawText) {
+        const text = String(rawText || '').replace(/\r\n?/g, '\n').trim();
+        if (!text) return '';
+        const inline = (line) => this.formatMessageWithMentions(line, false)
+            .replace(/\*\*(.+?)\*\*/g, '<strong class="font-extrabold text-main">$1</strong>')
+            .replace(/(^|[\s(])\*(?!\s)([^*]+?)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+
+        const blocks = [];
+        let list = null; // { type: 'ul' | 'ol', items: [] }
+        let para = [];
+        const flushPara = () => {
+            if (para.length) blocks.push(`<p>${para.map(inline).join('<br>')}</p>`);
+            para = [];
+        };
+        const flushList = () => {
+            if (list) {
+                const items = list.items.map(it => `<li>${inline(it)}</li>`).join('');
+                blocks.push(`<${list.type} class="ai-list ai-list-${list.type}">${items}</${list.type}>`);
+            }
+            list = null;
+        };
+
+        for (const rawLine of text.split('\n')) {
+            const line = rawLine.trim();
+            if (!line) { flushPara(); flushList(); continue; }
+            const bullet = line.match(/^(?:[-*•]|🎵|🎶)\s+(.+)$/);
+            const numbered = line.match(/^\d{1,2}[.)]\s+(.+)$/);
+            if (bullet || numbered) {
+                const type = bullet ? 'ul' : 'ol';
+                flushPara();
+                if (!list || list.type !== type) { flushList(); list = { type, items: [] }; }
+                list.items.push((bullet || numbered)[1]);
+            } else {
+                flushList();
+                para.push(line);
+            }
+        }
+        flushPara();
+        flushList();
+        return `<div class="ai-rich">${blocks.join('')}</div>`;
     }
 
     spawnFloatingEmoji(emoji) {

@@ -351,14 +351,118 @@ def extract_lyrics_excerpt(lyrics_data: Optional[Dict[str, Any]], max_lines: int
     return "\n".join(chosen)[:900]
 
 
+# Curated, real trending / once-trending hits grouped by mood. Grounds the LLM so it suggests songs
+# that truly fit the user's feeling instead of falling back to the same 1-2 mega hits it remembers.
+MOOD_HIT_CATALOG: Dict[str, Dict[str, Any]] = {
+    "buon": {
+        "label": "Buồn / thất tình / tổn thương",
+        "songs": [
+            ("Một Ngàn Nỗi Đau", "Văn Mai Hương"), ("Ai Chung Tình Được Mãi", "Đinh Tùng Huy"),
+            ("Sau Tất Cả", "ERIK"), ("Em Không Sai Chúng Ta Sai", "ERIK"),
+            ("Chúng Ta Không Thuộc Về Nhau", "Sơn Tùng M-TP"), ("Đừng Làm Trái Tim Anh Đau", "Sơn Tùng M-TP"),
+            ("Muộn Rồi Mà Sao Còn", "Sơn Tùng M-TP"), ("Buông Đôi Tay Nhau Ra", "Sơn Tùng M-TP"),
+            ("Có Chàng Trai Viết Lên Cây", "Phan Mạnh Quỳnh"), ("Hoa Nở Không Màu", "Hoài Lâm"),
+            ("Từng Là", "Vũ Cát Tường"), ("Mất Kết Nối", "Dương Domic"), ("Tràn Bộ Nhớ", "Dương Domic"),
+            ("Dù Cho Mai Về Sau", "buitruonglinh"), ("Đúng Cũng Thành Sai", "Mỹ Tâm"),
+            ("Thằng Điên", "JustaTee, Phương Ly"), ("Người Lạ Thoáng Qua", "Đinh Tùng Huy"),
+            ("Ngày Mai Người Ta Lấy Chồng", "Thành Đạt"), ("Sóng Gió", "Jack, K-ICM"), ("Hồng Nhan", "Jack"),
+            ("Một Bước Yêu Vạn Dặm Đau", "Mr. Siro"), ("Tháng Tư Là Lời Nói Dối Của Em", "Hà Anh Tuấn"),
+            ("Nếu Lúc Đó", "tlinh"), ("Sài Gòn Đau Lòng Quá", "Hứa Kim Tuyền, Hoàng Duyên"),
+            ("Chạy Về Khóc Với Anh", "ERIK"), ("Đế Vương", "Đình Dũng"),
+            ("Someone You Loved", "Lewis Capaldi"), ("drivers license", "Olivia Rodrigo"), ("lovely", "Billie Eilish, Khalid"),
+        ],
+    },
+    "co_don": {
+        "label": "Cô đơn / đêm khuya / trầm tư",
+        "songs": [
+            ("Anh Đã Quen Với Cô Đơn", "Soobin Hoàng Sơn"), ("Bước Qua Mùa Cô Đơn", "Vũ."), ("Lạ Lùng", "Vũ."),
+            ("Đông Kiếm Em", "Vũ."), ("Hôm Nay Tôi Buồn", "Phùng Khánh Linh"), ("Ngày Chưa Giông Bão", "Bùi Lan Hương"),
+            ("Nàng Thơ", "Hoàng Dũng"), ("Ngủ Một Mình", "HIEUTHUHAI, Negav, Kewtiie"), ("Chuyện Rằng", "Thịnh Suy"),
+            ("Một Đêm Say", "Thịnh Suy"), ("Vì Anh Đâu Có Biết", "Madihu, Vũ."), ("Waiting For You", "MONO"),
+            ("Let Her Go", "Passenger"),
+        ],
+    },
+    "mua": {
+        "label": "Mưa / hoài niệm",
+        "songs": [
+            ("Mưa Tháng Sáu", "Văn Mai Hương, GREY D, Trung Quân"), ("Dấu Mưa", "Trung Quân"),
+            ("Em Gái Mưa", "Hương Tràm"), ("Dự Báo Thời Tiết Hôm Nay Mưa", "GREY D"),
+            ("Tình Đầu", "Tăng Duy Tân"), ("Chúng Ta Của Hiện Tại", "Sơn Tùng M-TP"),
+            ("Em Của Ngày Hôm Qua", "Sơn Tùng M-TP"), ("Có Hẹn Với Thanh Xuân", "MONSTAR"),
+            ("Nắng Ấm Xa Dần", "Sơn Tùng M-TP"), ("3107 3", "W/n, Nâu, Duongg"),
+        ],
+    },
+    "chill": {
+        "label": "Chill / thư giãn / làm việc",
+        "songs": [
+            ("Bài Này Chill Phết", "Đen, MIN"), ("Lối Nhỏ", "Đen, Phương Anh Đào"), ("Chuyện Đôi Ta", "Emcee L, Muộii"),
+            ("Ánh Sao Và Bầu Trời", "T.R.I"), ("Có Em", "Madihu, Low G"), ("Ghé Qua", "Dick, Tofu, PC"),
+            ("Cứ Chill Thôi", "Chillies, Suni Hạ Linh, Rhymastic"), ("Từ Chối Nhẹ Nhàng Thôi", "Bích Phương, Phúc Du"),
+            ("Thích Em Hơi Nhiều", "Wren Evans"), ("Không Thể Say", "HIEUTHUHAI"), ("Exit Sign", "HIEUTHUHAI"),
+            ("Birds of a Feather", "Billie Eilish"),
+        ],
+    },
+    "yeu": {
+        "label": "Yêu đương / lãng mạn / thả thính",
+        "songs": [
+            ("Nơi Này Có Anh", "Sơn Tùng M-TP"), ("Có Chắc Yêu Là Đây", "Sơn Tùng M-TP"), ("Hơn Cả Yêu", "Đức Phúc"),
+            ("Ngày Đầu Tiên", "Đức Phúc"), ("Ánh Nắng Của Anh", "Đức Phúc"), ("Em Đồng Ý", "Đức Phúc, 911"),
+            ("Tình Yêu Màu Hồng", "Hồ Văn Quý, Xám"), ("Ngày Em Đẹp Nhất", "Tama"), ("Từng Ngày Yêu Em", "buitruonglinh"),
+            ("Trốn Tìm", "Đen, MTV"), ("Có Em Chờ", "MIN, Mr. A"), ("Die With A Smile", "Lady Gaga, Bruno Mars"),
+            ("Perfect", "Ed Sheeran"), ("Until I Found You", "Stephen Sanchez"),
+        ],
+    },
+    "vui": {
+        "label": "Vui vẻ / sôi động / quẩy",
+        "songs": [
+            ("Hãy Trao Cho Anh", "Sơn Tùng M-TP, Snoop Dogg"), ("See Tình", "Hoàng Thùy Linh"),
+            ("Để Mị Nói Cho Mà Nghe", "Hoàng Thùy Linh"), ("Gieo Quẻ", "Hoàng Thùy Linh, Đen"),
+            ("Bắc Bling", "Hòa Minzy"), ("Thị Mầu", "Hòa Minzy"), ("Bật Tình Yêu Lên", "Hòa Minzy, Tăng Duy Tân"),
+            ("Cắt Đôi Nỗi Sầu", "Tăng Duy Tân"), ("Bánh Mì Không", "Đạt G, DuUyên"), ("Răng Khôn", "Phí Phương Anh, RIN9"),
+            ("Đi Đu Đưa Đi", "Bích Phương"), ("Bùa Yêu", "Bích Phương"), ("Chúng Ta Của Tương Lai", "Sơn Tùng M-TP"),
+            ("APT.", "ROSÉ, Bruno Mars"), ("Espresso", "Sabrina Carpenter"),
+        ],
+    },
+    "dong_luc": {
+        "label": "Động lực / gia đình / nhớ nhà / tự hào",
+        "songs": [
+            ("Đi Về Nhà", "Đen, JustaTee"), ("Mang Tiền Về Cho Mẹ", "Đen, Nguyên Thảo"), ("Hai Triệu Năm", "Đen, Biên"),
+            ("Đi Để Trở Về", "Soobin Hoàng Sơn"), ("Ai Cũng Phải Bắt Đầu Từ Đâu Đó", "HIEUTHUHAI"),
+            ("Còn Gì Đẹp Hơn", "Nguyễn Hùng"), ("Một Vòng Việt Nam", "Tùng Dương"),
+            ("Không Phải Dạng Vừa Đâu", "Sơn Tùng M-TP"), ("Một Nhà", "Da LAB"),
+        ],
+    },
+}
+
+
+def format_mood_catalog() -> str:
+    lines = []
+    for key, grp in MOOD_HIT_CATALOG.items():
+        songs = "; ".join(f"{t} - {a}" for t, a in grp["songs"])
+        lines.append(f"[{key}] {grp['label']}: {songs}")
+    return "\n".join(lines)
+
+
+def catalog_songs_for_mood(mood: str) -> List[Dict[str, str]]:
+    grp = MOOD_HIT_CATALOG.get((mood or "").strip().lower())
+    if not grp:
+        return []
+    return [{"title": t, "artist": a, "reason": f"Bản hit hợp tâm trạng {grp['label'].split(' / ')[0].lower()}"}
+            for t, a in grp["songs"]]
+
+
 async def chat_with_em_be_floor_2(
     room_context: str,
     sender_name: str,
     user_message: str,
     youtube_candidates: Optional[List[Dict[str, Any]]] = None,
+    avoid_titles: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Conversational AI assistant '@Em bé floor 2' that knows full room context & can suggest trending songs."""
     clean_q = strip_ai_mention(user_message) or "Chào Em bé floor 2!"
+    avoid_block = ""
+    if avoid_titles:
+        avoid_block = "\n\n=== BÀI ĐÃ CÓ TRONG PHÒNG / VỪA GỢI Ý (KHÔNG GỢI Ý LẠI) ===\n" + "; ".join(avoid_titles[:30])
 
     cand_block = ""
     if youtube_candidates:
@@ -376,18 +480,31 @@ async def chat_with_em_be_floor_2(
         "- Trả lời 100% bằng TIẾNG VIỆT tự nhiên, gần gũi, dí dỏm (TUYỆT ĐỐI KHÔNG chèn chữ Hán / tiếng Trung vào câu trả lời), xưng 'mình' hoặc 'Em bé' và gọi tên thành viên khi phù hợp.\n"
         "- Có thể tán gẫu MỌI CHỦ ĐỀ với thành viên (âm nhạc, đời sống, công việc, code, tâm sự, đùa vui, phim ảnh...), KHÔNG bị giới hạn chỉ hỏi về nhạc.\n"
         "- Luôn tận dụng ngữ cảnh phòng (tên phòng, bài đang phát & nội dung lời bài hát, bài sắp phát, gu nhạc từng thành viên, mạch chat gần đây) để trả lời sâu sắc và đúng trọng tâm.\n"
-        "- Giữ câu trả lời súc tích, dễ đọc trong khung chat (thường 2–4 câu, dùng 1–2 emoji vừa phải).\n"
-        "- Khi người dùng nhờ gợi ý bài hát / tìm nhạc theo tên bài, ca sĩ hoặc tâm trạng:\n"
-        "  1. Nếu tin nhắn nhắc đến tên một bài hát hoặc cụm từ tên bài cụ thể (ví dụ 'mưa tháng 6', 'nàng thơ', 'nơi này có anh'...), BÀI ĐẦU TIÊN trong `suggested_songs` BẮT BUỘC phải là bản hit gốc chính chủ đó (ví dụ 'Mưa Tháng Sáu' - 'Văn Mai Hương, GREY D, Trung Quân').\n"
-        "  2. ƯU TIÊN TUYỆT ĐỐI những bài hát ĐANG TRENDING hoặc ĐÃ TỪNG RẤT TRENDING (Hit Quốc Dân hàng chục/trăm triệu view trên YouTube, Làn Sóng Xanh, ZingChart, Spotify Top 50, Billboard).\n"
-        "  3. TUYỆT ĐỐI KHÔNG chọn các bản Interlude/Intro/Outro ngắn, không chọn bài xa lạ ít người biết, và KHÔNG tự bịa tên bài hát không tồn tại.\n"
-        "- Nếu người dùng chỉ tán gẫu bình thường (không xin gợi ý nhạc), để `suggested_songs` là mảng rỗng `[]`.\n\n"
+        "- Giữ câu trả lời súc tích, dễ đọc trong khung chat, dùng 1–3 emoji vừa phải.\n"
+        "- TRÌNH BÀY `reply` CÓ BỐ CỤC, KHÔNG viết dồn 1 đoạn dài (dùng ký tự xuống dòng \\n trong chuỗi JSON):\n"
+        "  • Tán gẫu thường: 1–2 đoạn ngắn (mỗi đoạn 1–2 câu), các đoạn cách nhau bằng 1 dòng trống (\\n\\n).\n"
+        "  • Khi gợi ý nhạc: dòng 1 là câu đồng cảm / mở đầu ngắn; dòng trống; danh sách mỗi bài 1 dòng dạng "
+        "'- **Tên bài** – Ca sĩ: lý do ngắn (tối đa 12 từ)'; dòng trống; 1 câu chốt ấm áp.\n"
+        "  • Khi liệt kê ý / hướng dẫn: dùng gạch đầu dòng '- ' hoặc '1. '. Dùng **in đậm** cho tên bài hoặc ý chính, không lạm dụng.\n"
+        "  • KHÔNG dùng tiêu đề markdown (#), bảng hay code block.\n"
+        "- Khi người dùng nhờ gợi ý bài hát / tìm nhạc (kể cả nói gián tiếp như 'tôi đang buồn quá', 'có bài nào hợp lúc này không'):\n"
+        "  1. XÁC ĐỊNH ĐÚNG TÂM TRẠNG trong tin nhắn mới nhất và mạch chat gần đây (buồn, cô đơn, mưa/hoài niệm, chill, yêu, vui, động lực) rồi đặt vào trường `mood` bằng đúng 1 mã trong ngoặc vuông của KHO HIT bên dưới.\n"
+        "  2. Gợi ý đúng 3 bài KHỚP ĐÚNG TÂM TRẠNG ĐÓ. Người buồn thì gợi ý bài buồn, an ủi; TUYỆT ĐỐI KHÔNG đưa bài tình yêu vui tươi cho người đang buồn.\n"
+        "  3. Ưu tiên chọn từ KHO HIT TRENDING THEO TÂM TRẠNG bên dưới (đều là bài có thật, đang hoặc từng rất trending). Có thể thêm bản hit có thật khác nếu chắc chắn đúng tên bài và ca sĩ. Đa dạng ca sĩ, mỗi ca sĩ tối đa 1 bài.\n"
+        "  4. Nếu người dùng nêu tên một bài hoặc ca sĩ cụ thể, bài đầu tiên phải là đúng bản gốc chính chủ đó.\n"
+        "  5. Gu nhạc của thành viên và lịch sử phòng CHỈ để tham khảo; KHÔNG gợi ý lại các bài trong mục 'KHÔNG GỢI Ý LẠI'.\n"
+        "  6. KHÔNG chọn bản Interlude/Intro/Outro, remix, cover; KHÔNG bịa tên bài.\n"
+        "  7. Trong `reply`, đồng cảm đúng tâm trạng người dùng và liệt kê CHÍNH XÁC các bài trong `suggested_songs` theo đúng thứ tự, mỗi bài 1 dòng như quy tắc trình bày ở trên.\n"
+        "- Nếu người dùng chỉ tán gẫu bình thường (không xin gợi ý nhạc), để `suggested_songs` là mảng rỗng `[]` và `mood` là chuỗi rỗng.\n\n"
+        f"=== KHO HIT TRENDING THEO TÂM TRẠNG ===\n{format_mood_catalog()}\n\n"
         "LUÔN trả về đúng định dạng JSON:\n"
-        '{"reply": "câu trả lời tự nhiên của bạn", "suggested_songs": [{"title": "Tên bài hát chuẩn", "artist": "Tên ca sĩ chính xác"}]}'
+        '{"reply": "Câu mở đầu đồng cảm 🥺\\n\\n- **Tên bài 1** – Ca sĩ: lý do ngắn\\n- **Tên bài 2** – Ca sĩ: lý do ngắn\\n\\nCâu chốt ấm áp 💕", '
+        '"mood": "buon", "suggested_songs": [{"title": "Tên bài hát chuẩn", "artist": "Tên ca sĩ chính xác"}]}'
     )
 
     user_prompt = (
         f"=== NGỮ CẢNH PHÒNG HIỆN TẠI ===\n{room_context}"
+        f"{avoid_block}"
         f"{cand_block}\n\n"
         f"=== TIN NHẮN MỚI TỪ {sender_name} ===\n{clean_q}"
     )
@@ -397,8 +514,8 @@ async def chat_with_em_be_floor_2(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.55,
-        max_tokens=500,
+        temperature=0.6,
+        max_tokens=650,
         json_mode=True,
     )
 
@@ -406,8 +523,9 @@ async def chat_with_em_be_floor_2(
     if parsed and isinstance(parsed.get("reply"), str) and parsed["reply"].strip():
         sugs: List[Dict[str, str]] = []
         raw_sugs = parsed.get("suggested_songs")
+        mood = str(parsed.get("mood") or "").strip().lower()
         if isinstance(raw_sugs, list):
-            for s in raw_sugs[:3]:
+            for s in raw_sugs[:5]:
                 if isinstance(s, dict) and s.get("title"):
                     sugs.append({
                         "title": _strip_stray_cjk(str(s.get("title", "")).strip())[:80],
@@ -416,6 +534,7 @@ async def chat_with_em_be_floor_2(
         return {
             "reply": _strip_stray_cjk(parsed["reply"].strip())[:900],
             "suggested_songs": sugs,
+            "mood": mood if mood in MOOD_HIT_CATALOG else "",
         }
 
     # Graceful fallback if JSON parsing failed but plain text exists

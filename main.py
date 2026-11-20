@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import math
 import os
+import random
 import re
 import secrets
 import time
@@ -28,6 +29,7 @@ from services.ai import (
     AI_BOT_NAME,
     analyze_room_vibe,
     build_mc_context,
+    catalog_songs_for_mood,
     build_room_ai_context,
     chat_with_em_be_floor_2,
     extract_lyrics_excerpt,
@@ -1183,22 +1185,44 @@ async def _handle_ai_chat_reply(room: "Room", sender_name: str, user_text: str) 
         lyrics_excerpt = await get_room_lyrics_excerpt(room)
         ctx = build_room_ai_context(room, current_lyrics_excerpt=lyrics_excerpt)
 
-        ai_out = await chat_with_em_be_floor_2(ctx, sender_name, user_text)
+        # Songs already in the room or recently suggested by the bot -> never suggest them again
+        exclude_ids: Set[str] = set()
+        avoid_titles: List[str] = []
+        room_tracks = ([room.current_track] if room.current_track else []) + list(room.queue) + list(room.history[-15:])
+        for t in room_tracks:
+            exclude_ids.add(t.id)
+            avoid_titles.append(t.title[:70])
+        for m in room.messages[-40:]:
+            for st in (m.get("suggested_tracks") or []) if m.get("is_ai") else []:
+                if st.get("id"):
+                    exclude_ids.add(st["id"])
+                if st.get("title"):
+                    avoid_titles.append(str(st["title"])[:70])
+        avoid_titles = list(dict.fromkeys(avoid_titles))
+
+        ai_out = await chat_with_em_be_floor_2(ctx, sender_name, user_text, avoid_titles=avoid_titles)
         reply_text = (ai_out.get("reply") or "").strip()
         if not reply_text:
             return
 
-        exclude_ids: Set[str] = set()
-        if room.current_track:
-            exclude_ids.add(room.current_track.id)
-        for t in room.queue:
-            exclude_ids.add(t.id)
+        raw_songs = list(ai_out.get("suggested_songs") or [])
+        mood = ai_out.get("mood") or ""
+        suggested_tracks = await _resolve_ai_song_suggestions(raw_songs, exclude_ids=exclude_ids, limit=3)
 
-        suggested_tracks = await _resolve_ai_song_suggestions(
-            ai_out.get("suggested_songs") or [],
-            exclude_ids=exclude_ids,
-            limit=3,
-        )
+        # Backfill with verified mood-matched trending hits if some LLM picks were unplayable / repeats
+        if mood and len(suggested_tracks) < 3:
+            asked = {_normalize_vn_music_text(s.get("title", "")) for s in raw_songs}
+            pool = [
+                s for s in catalog_songs_for_mood(mood)
+                if _normalize_vn_music_text(s["title"]) not in asked
+                and not any(_normalize_vn_music_text(s["title"]) in _normalize_vn_music_text(a) for a in avoid_titles)
+            ]
+            random.shuffle(pool)
+            have = exclude_ids | {t.get("id") for t in suggested_tracks}
+            extra = await _resolve_ai_song_suggestions(
+                pool[: (3 - len(suggested_tracks)) + 2], exclude_ids=have, limit=3 - len(suggested_tracks)
+            )
+            suggested_tracks.extend(extra)
 
         async with room.lock:
             ai_msg = {
