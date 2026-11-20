@@ -37,3 +37,22 @@ services:
       # Tuỳ chọn: proxy dân dụng nếu YouTube chặn IP datacenter cho luồng audio fallback
       - key: YT_PROXY
         sync: false
+      # --- Em bé floor 2 (AI) ---
+      # Groq API keys (cách nhau bởi dấu phẩy). Nên dùng key từ 2 tổ chức Groq khác nhau để nhân đôi hạn mức free
+      - key: GROQ_API_KEYS
+        sync: false
+      # 1 = agent gpt-oss (công cụ, tra cứu, thêm bài); 0 = chỉ dùng pipeline Qwen cũ
+      - key: AI_AGENT_ENABLED
+        value: "1"
+      # Phòng mới mặc định bật chế độ Em bé chủ động (chào người mới, nhắc lịch...). Host vẫn tắt được
+      - key: AI_PROACTIVE_DEFAULT
+        value: "1"
+      # Giây giữ thành viên trong phòng khi rớt kết nối (đổi tab / mạng chập chờn) trước khi tính là rời phòng
+      - key: LEAVE_GRACE_SEC
+        value: "300"
+      # Bí mật để băm định danh thiết bị -> profile trí nhớ. ĐẶT 1 LẦN, đổi về sau = mọi người mất trí nhớ AI
+      - key: PROFILE_ID_PEPPER
+        sync: false
+      # Token xem /api/admin/ai-metrics (header X-Admin-Token). Bỏ trống = tắt endpoint
+      - key: ADMIN_TOKEN
+        sync: false
