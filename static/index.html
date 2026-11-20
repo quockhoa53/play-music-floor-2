@@ -37,7 +37,7 @@
     </script>
 
     <!-- Custom Dual-Theme Stylesheet -->
-    <link rel="stylesheet" href="/static/css/style.css?v=2.11">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.19">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎵</text></svg>">
 </head>
 <body class="min-h-screen flex flex-col selection:bg-indigo-500 selection:text-white">
@@ -95,27 +95,27 @@
             <div class="max-w-5xl w-full">
 
                 <!-- Hero Heading -->
-                <div class="text-center mb-9">
-                    <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full surface-card text-indigo-600 dark:text-indigo-400 text-xs font-bold tracking-wide mb-4">
-                        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        ĐỒNG BỘ TỪNG GIÂY • PHÁT NHẠC THEO THỨ TỰ • CHAT REALTIME
+                <div class="text-center mb-6 sm:mb-9">
+                    <div class="inline-flex items-center gap-2 px-3 sm:px-3.5 py-1.5 rounded-full surface-card text-indigo-600 dark:text-indigo-400 text-[10.5px] sm:text-xs font-bold tracking-wide mb-3.5 max-w-full">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0"></span>
+                        <span class="leading-snug">ĐỒNG BỘ TỪNG GIÂY • NHẠC FIFO • CHAT REALTIME</span>
                     </div>
-                    <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-main leading-tight">
+                    <h1 class="text-2xl sm:text-5xl font-extrabold tracking-tight text-main leading-tight">
                         Nghe nhạc YouTube chung,<br class="hidden sm:inline">
                         <span class="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 via-violet-500 to-pink-500 dark:from-indigo-400 dark:via-purple-300 dark:to-pink-400">
                             chill cùng bạn bè mọi lúc
                         </span>
                     </h1>
-                    <p class="text-sub text-sm sm:text-base mt-3 max-w-xl mx-auto leading-relaxed">
+                    <p class="text-sub text-xs sm:text-base mt-2.5 sm:mt-3 max-w-xl mx-auto leading-relaxed">
                         Tạo phòng trong 1 giây, tìm kiếm nhạc YouTube tức thì không cần bấm nút và thưởng thức danh sách phát nối tiếp cùng nhau.
                     </p>
                 </div>
 
                 <!-- 2-Column Lobby Grid -->
-                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
 
                     <!-- Left: User Profile Customization Card -->
-                    <div class="lg:col-span-5 surface-card p-6 rounded-3xl">
+                    <div class="lg:col-span-5 surface-card p-4 sm:p-6 rounded-3xl">
                         <div class="flex items-center justify-between mb-5">
                             <h3 class="text-sm font-bold text-main flex items-center gap-2">
                                 <span class="w-7 h-7 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
@@ -144,7 +144,7 @@
                             <div>
                                 <label class="block text-xs font-semibold text-sub mb-1.5">Tên hiển thị</label>
                                 <input type="text" id="profile-name-input" maxlength="25"
-                                    class="input-field w-full px-3.5 py-2.5 rounded-xl text-sm font-medium"
+                                    class="input-field w-full px-3.5 py-2.5 rounded-xl text-base sm:text-sm font-medium"
                                     placeholder="Nhập biệt danh của bạn...">
                             </div>
 
@@ -164,8 +164,8 @@
                     <div class="lg:col-span-7 flex flex-col gap-6">
 
                         <!-- Create / Join Segmented Card -->
-                        <div class="surface-card p-6 rounded-3xl">
-                            <div class="flex items-center justify-between flex-wrap gap-3 mb-5">
+                        <div class="surface-card p-4 sm:p-6 rounded-3xl">
+                            <div class="flex items-center justify-between flex-wrap gap-3 mb-4 sm:mb-5">
                                 <h3 class="text-sm font-bold text-main">Bắt đầu ngay</h3>
                                 <div class="segmented-track p-1 rounded-xl inline-flex gap-1">
                                     <button type="button" id="lobby-tab-create" class="segmented-btn active px-3.5 py-1.5 rounded-lg text-xs font-bold">
@@ -182,8 +182,8 @@
                                 <form onsubmit="handleCreateRoom(event)" class="space-y-3.5">
                                     <div class="flex flex-col sm:flex-row gap-2.5">
                                         <input type="text" id="create-room-name"
-                                            class="input-field flex-1 px-4 py-3 rounded-xl text-sm font-medium"
-                                            placeholder="Đặt tên phòng (VD: Góc Chill Tối Thứ 6, Lofi Học Bài...)">
+                                            class="input-field flex-1 px-4 py-3 rounded-xl text-base sm:text-sm font-medium"
+                                            placeholder="Đặt tên phòng (VD: Góc Chill, Lofi...)">
                                         <button type="submit"
                                             class="btn-gradient px-6 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 flex-shrink-0">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
@@ -192,16 +192,16 @@
                                     </div>
                                     <div class="flex flex-col gap-2 pt-0.5">
                                         <label class="inline-flex items-center gap-2.5 cursor-pointer select-none">
-                                            <input type="checkbox" id="create-room-dj-mode" class="w-4 h-4 rounded accent-indigo-600">
-                                            <span class="text-xs text-sub">Bật chế độ DJ (chỉ Chủ phòng có quyền tạm dừng / chuyển bài)</span>
+                                            <input type="checkbox" id="create-room-dj-mode" class="w-4 h-4 rounded accent-indigo-600 flex-shrink-0">
+                                            <span class="text-xs text-sub">Bật chế độ DJ (chỉ Chủ phòng được thêm bài hát vào hàng đợi)</span>
                                         </label>
                                         <label class="inline-flex items-center gap-2.5 cursor-pointer select-none">
-                                            <input type="checkbox" id="create-room-private" class="w-4 h-4 rounded accent-indigo-600">
+                                            <input type="checkbox" id="create-room-private" class="w-4 h-4 rounded accent-indigo-600 flex-shrink-0">
                                             <span class="text-xs text-sub">🔒 Phòng riêng tư (ẩn khỏi danh sách, cần link mời hoặc mật khẩu)</span>
                                         </label>
                                         <div id="create-room-passcode-wrap" class="hidden pt-1">
                                             <input type="password" id="create-room-passcode" maxlength="64" autocomplete="new-password"
-                                                class="input-field w-full sm:w-72 px-3.5 py-2 rounded-xl text-xs font-medium"
+                                                class="input-field w-full sm:w-72 px-3.5 py-2 rounded-xl text-base sm:text-xs font-medium"
                                                 placeholder="Mật khẩu phòng (tùy chọn, tối thiểu 4 ký tự)...">
                                         </div>
                                     </div>
@@ -214,7 +214,7 @@
                                     <div class="relative flex-1">
                                         <span class="absolute inset-y-0 left-0 pl-4 flex items-center text-dim font-mono-num font-bold text-sm">#</span>
                                         <input type="text" id="input-join-room-id"
-                                            class="input-field w-full pl-9 pr-4 py-3 rounded-xl text-sm font-medium"
+                                            class="input-field w-full pl-9 pr-4 py-3 rounded-xl text-base sm:text-sm font-medium"
                                             placeholder="Nhập mã phòng (VD: chill-zone)...">
                                     </div>
                                     <button type="submit"
@@ -227,7 +227,7 @@
                         </div>
 
                         <!-- Active Public Rooms -->
-                        <div class="surface-card p-6 rounded-3xl">
+                        <div class="surface-card p-4 sm:p-6 rounded-3xl">
                             <div class="flex items-center justify-between mb-4">
                                 <h3 class="text-sm font-bold text-main flex items-center gap-2">
                                     <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
@@ -253,22 +253,22 @@
     <div id="room-view" class="hidden fixed inset-0 z-10 flex flex-col h-[100dvh] max-h-[100dvh] overflow-hidden">
 
         <!-- TOP STUDIO HEADER WITH SPOTLIGHT REALTIME SEARCH -->
-        <header class="surface-card border-b border-theme px-3 md:px-5 py-2.5 flex-shrink-0 z-40">
-            <div class="flex flex-wrap lg:flex-nowrap items-center justify-between gap-3">
+        <header class="surface-card border-b border-theme px-3 md:px-5 py-2 sm:py-2.5 flex-shrink-0 z-40">
+            <div class="flex flex-wrap lg:flex-nowrap items-center justify-between gap-2 lg:gap-3">
 
                 <!-- Left: Room Identity -->
-                <div class="flex items-center gap-2.5 min-w-0 order-1">
-                    <div class="w-9 h-9 rounded-xl btn-gradient flex items-center justify-center flex-shrink-0">
-                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                <div class="flex items-center gap-2 min-w-0 flex-1 lg:flex-initial order-1">
+                    <div class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl btn-gradient flex items-center justify-center flex-shrink-0">
+                        <svg class="w-4 h-4 sm:w-5 sm:h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
                     </div>
-                    <div class="min-w-0">
-                        <div class="flex items-center gap-2">
-                            <h2 id="room-title-display" class="font-bold text-main text-sm md:text-[15px] truncate max-w-[160px] sm:max-w-[220px]">Phòng Nhạc</h2>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-1.5 sm:gap-2 min-w-0">
+                            <h2 id="room-title-display" class="font-bold text-main text-sm md:text-[15px] truncate">Phòng Nhạc</h2>
                             <button type="button" id="room-id-badge" title="Bấm để sao chép link mời"
-                                class="px-2 py-0.5 rounded-md surface-subtle text-sub hover:text-indigo-600 dark:hover:text-indigo-400 text-[11px] font-mono-num font-semibold flex-shrink-0 cursor-pointer">
+                                class="hidden sm:inline-flex px-2 py-0.5 rounded-md surface-subtle text-sub hover:text-indigo-600 dark:hover:text-indigo-400 text-[11px] font-mono-num font-semibold flex-shrink-0 cursor-pointer">
                                 #id
                             </button>
-                            <span id="room-private-badge" class="hidden px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-[10px] font-bold flex-shrink-0">🔒 Riêng tư</span>
+                            <span id="room-private-badge" class="hidden px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 text-[10px] font-bold flex-shrink-0">🔒</span>
                             <div id="user-role-badge" class="hidden sm:block flex-shrink-0"></div>
                         </div>
                     </div>
@@ -278,13 +278,13 @@
                 <div id="realtime-search-wrapper" class="relative w-full lg:max-w-xl lg:flex-1 order-3 lg:order-2">
                     <div class="relative flex items-center">
                         <!-- Search Icon -->
-                        <span class="absolute left-3.5 text-dim pointer-events-none">
+                        <span class="absolute left-3 text-dim pointer-events-none">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                         </span>
 
                         <input type="text" id="search-music-input" autocomplete="off" spellcheck="false"
-                            class="input-field w-full pl-10 pr-16 py-2.5 rounded-2xl text-xs md:text-sm font-medium"
-                            placeholder="Gõ tên bài hát hoặc dán link YouTube (tìm realtime)...">
+                            class="input-field w-full pl-9 pr-14 py-2 sm:py-2.5 rounded-2xl text-base sm:text-sm font-medium"
+                            placeholder="Tìm bài hát hoặc dán link YouTube...">
 
                         <!-- Right Slot inside Input: Spinner / Clear / Shortcut Hint -->
                         <div class="absolute right-2.5 flex items-center gap-1.5">
@@ -308,56 +308,49 @@
                     </div>
 
                     <!-- Floating Realtime Search Results Dropdown -->
-                    <div id="search-results-box" class="hidden search-dropdown-anim absolute left-0 right-0 top-[calc(100%+8px)] surface-dropdown rounded-2xl p-2.5 z-50">
-                        <div class="flex items-center justify-between px-2 pb-2 mb-1.5 border-b border-theme">
-                            <span id="search-dropdown-header" class="text-[11px] font-semibold text-sub">
-                                Gợi ý nhanh — Gõ để tìm kiếm YouTube tức thì
+                    <div id="search-results-box" class="hidden search-dropdown-anim absolute left-0 right-0 top-[calc(100%+6px)] surface-dropdown rounded-2xl p-2 sm:p-2.5 z-50">
+                        <div class="flex items-center justify-between px-2 pb-1.5 mb-1.5 border-b border-theme">
+                            <span id="search-dropdown-header" class="text-[11px] font-semibold text-sub truncate">
+                                Gợi ý nhanh — Gõ để tìm tức thì
                             </span>
-                            <span class="hidden sm:inline text-[10px] text-dim font-mono-num">↑↓ Chọn • Enter Thêm • Esc Đóng</span>
+                            <span class="hidden sm:inline text-[10px] text-dim font-mono-num flex-shrink-0 ml-2">↑↓ Chọn • Enter Thêm • Esc Đóng</span>
                         </div>
-                        <div id="search-results-list" class="space-y-1 max-h-[360px] overflow-y-auto pr-0.5">
+                        <div id="search-results-list" class="space-y-1 max-h-[55dvh] sm:max-h-[360px] overflow-y-auto pr-0.5">
                             <!-- Populated live as you type -->
                         </div>
                     </div>
                 </div>
 
-                <!-- Right: Compact Studio Controls -->
-                <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 order-2 lg:order-3">
-                    <!-- Quick Radio Mode Pill Toggle -->
-                    <button type="button" id="btn-header-radio-toggle" class="surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main inline-flex items-center gap-1.5" title="Bật/Tắt chế độ Radio (nghe nhạc không cần xem video)">
+                <!-- Right: Compact Studio Controls (Fits cleanly on Row 1 on phones!) -->
+                <div class="flex items-center gap-1 sm:gap-2 flex-shrink-0 order-2 lg:order-3">
+                    <!-- Quick Radio Mode Pill Toggle (Desktop only — Stage already has mode switcher below on mobile) -->
+                    <button type="button" id="btn-header-radio-toggle" class="hidden md:inline-flex surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main items-center gap-1.5" title="Chuyển chế độ Radio / Lời bài hát / Video">
                         <svg class="w-3.5 h-3.5 text-pink-500" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
-                        <span class="hidden md:inline js-header-radio-label">Radio</span>
+                        <span class="js-header-radio-label">Radio</span>
                     </button>
 
-                    <!-- Quick Chat Minimize/Expand Toggle -->
-                    <button type="button" id="btn-header-chat-toggle" class="relative surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-bold text-main inline-flex items-center gap-1.5" title="Thu nhỏ / Mở rộng khung chat">
-                        <svg class="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
-                        <span class="hidden xl:inline js-header-chat-label">Chat</span>
-                        <span class="js-chat-unread-badge hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center shadow">0</span>
-                    </button>
-
-                    <!-- DJ Mode (Host only) -->
-                    <button type="button" id="btn-dj-mode-toggle" class="hidden surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-semibold text-main inline-flex items-center gap-1.5" title="Bật/Tắt chế độ chỉ Host điều khiển nhạc">
+                    <!-- DJ Mode (Host only — when ON, only Host can add tracks to queue; default OFF) -->
+                    <button type="button" id="btn-dj-mode-toggle" class="hidden sm:inline-flex surface-subtle px-2.5 py-1.5 rounded-xl text-xs font-semibold text-main items-center gap-1.5" title="Bật/Tắt chế độ DJ (khi bật, chỉ Chủ phòng được thêm bài hát)">
                         DJ: Tắt
                     </button>
 
-                    <!-- Sound FX Toggle -->
-                    <button type="button" id="btn-toggle-sound-fx" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center" title="Bật/Tắt chuông thông báo">
+                    <!-- Sound FX Toggle (Tablet/Desktop) -->
+                    <button type="button" id="btn-toggle-sound-fx" class="hidden sm:flex surface-subtle w-9 h-9 rounded-xl items-center justify-center" title="Bật/Tắt chuông thông báo">
                     </button>
 
                     <!-- Light / Dark Theme Switcher -->
-                    <button type="button" class="js-theme-toggle theme-toggle-btn w-9 h-9 rounded-xl flex items-center justify-center" title="Chuyển giao diện Sáng / Tối">
+                    <button type="button" class="js-theme-toggle theme-toggle-btn w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center" title="Chuyển giao diện Sáng / Tối">
                         <span class="js-theme-icon"></span>
                     </button>
 
                     <!-- Share Invite Link -->
-                    <button type="button" id="btn-share-room" class="btn-gradient px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                    <button type="button" id="btn-share-room" class="btn-gradient w-8 h-8 sm:w-auto sm:h-9 sm:px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" title="Sao chép link mời bạn bè">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
                         <span class="hidden sm:inline">Mời bạn</span>
                     </button>
 
                     <!-- Leave Room -->
-                    <button type="button" id="btn-leave-room" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center text-sub hover:text-rose-500 hover:border-rose-500/40" title="Rời phòng">
+                    <button type="button" id="btn-leave-room" class="surface-subtle w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center text-sub hover:text-rose-500 hover:border-rose-500/40" title="Rời phòng">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
                     </button>
                 </div>
@@ -365,33 +358,33 @@
             </div>
         </header>
 
-        <!-- MAIN WORKSPACE: STAGE + QUEUE (Left) | CHAT + MEMBERS (Right) -->
-        <div class="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+        <!-- MAIN WORKSPACE: STAGE + QUEUE (Left) | CHAT + MEMBERS (Right / Mobile Sheet) -->
+        <div class="relative flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
 
             <!-- LEFT / CENTER COLUMN -->
-            <div class="flex-1 min-h-0 overflow-y-auto p-3.5 md:p-5 lg:p-6 space-y-5">
+            <div class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 md:p-5 lg:p-6 pb-20 lg:pb-6 space-y-4 sm:space-y-5">
 
                 <!-- NOW PLAYING STAGE CARD -->
-                <section class="surface-card rounded-3xl p-4 md:p-5 overflow-hidden">
+                <section class="surface-card rounded-3xl p-3.5 sm:p-4 md:p-5 overflow-hidden">
 
                     <!-- Mode Switcher Bar: Radio (Default) -> Lyrics -> Video -->
-                    <div class="flex items-center justify-between gap-2 mb-3.5">
-                        <div class="flex items-center gap-2 min-w-0">
-                            <span id="stage-mode-dot" class="w-2 h-2 rounded-full bg-pink-500"></span>
+                    <div class="flex items-center justify-between gap-2 mb-3">
+                        <div class="hidden sm:flex items-center gap-2 min-w-0">
+                            <span id="stage-mode-dot" class="w-2 h-2 rounded-full bg-pink-500 flex-shrink-0"></span>
                             <span id="stage-mode-heading" class="text-xs font-bold uppercase tracking-wider text-sub truncate">Đài phát Radio • Không cần Video</span>
                         </div>
 
-                        <div class="segmented-track p-1 rounded-xl inline-flex gap-1 flex-shrink-0">
-                            <button type="button" id="btn-mode-radio" class="segmented-btn active px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Chế độ Radio (mặc định) — chỉ nghe nhạc không cần xem video">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
+                        <div class="segmented-track p-1 rounded-xl w-full sm:w-auto grid grid-cols-3 sm:inline-flex gap-1 flex-shrink-0">
+                            <button type="button" id="btn-mode-radio" class="segmented-btn active px-2 sm:px-3 py-1.5 sm:py-1 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5" title="Chế độ Radio (mặc định) — chỉ nghe nhạc không cần xem video">
+                                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.93 19.07a10 10 0 010-14.14m14.14 0a10 10 0 010 14.14M7.76 16.24a6 6 0 010-8.48m8.48 0a6 6 0 010 8.48M12 12h.01"/></svg>
                                 <span>Radio</span>
                             </button>
-                            <button type="button" id="btn-mode-lyrics" class="segmented-btn px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem lời bài hát chạy đồng bộ theo nhạc">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z"/></svg>
-                                <span>Lời bài hát</span>
+                            <button type="button" id="btn-mode-lyrics" class="segmented-btn px-2 sm:px-3 py-1.5 sm:py-1 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5" title="Xem lời bài hát chạy đồng bộ theo nhạc">
+                                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z"/></svg>
+                                <span class="truncate">Lời bài hát</span>
                             </button>
-                            <button type="button" id="btn-mode-video" class="segmented-btn px-2.5 sm:px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5" title="Xem video YouTube">
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                            <button type="button" id="btn-mode-video" class="segmented-btn px-2 sm:px-3 py-1.5 sm:py-1 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5" title="Xem video YouTube">
+                                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
                                 <span>Video</span>
                             </button>
                         </div>
@@ -407,36 +400,36 @@
                         </div>
                     </div>
 
-                    <!-- RADIO MODE STUDIO DECK (Shown whenever Radio Mode is active — both playing & standby!) -->
-                    <div id="radio-mode-deck" class="hidden radio-deck p-5 sm:p-6">
+                    <!-- RADIO MODE STUDIO DECK (Compact horizontal on phone, spacious on desktop!) -->
+                    <div id="radio-mode-deck" class="hidden radio-deck p-3.5 sm:p-6">
                         <div id="radio-mode-bg" class="absolute inset-0 bg-cover bg-center scale-110 blur-2xl opacity-40 transition-all duration-700"></div>
                         <div class="absolute inset-0 bg-gradient-to-r from-slate-950/85 via-indigo-950/70 to-slate-950/80"></div>
 
-                        <div class="relative z-10 flex flex-col sm:flex-row items-center gap-5 sm:gap-6">
+                        <div class="relative z-10 flex flex-row items-center gap-3.5 sm:gap-6">
                             <!-- Spinning Vinyl Disc + Glow Halo -->
-                            <div class="relative w-32 h-32 sm:w-36 sm:h-36 flex-shrink-0">
+                            <div class="relative w-20 h-20 sm:w-36 sm:h-36 flex-shrink-0">
                                 <div id="radio-vinyl-glow" class="radio-vinyl-glow paused"></div>
                                 <div id="radio-vinyl" class="radio-vinyl-disc vinyl-spin vinyl-paused">
                                     <div class="radio-vinyl-grooves"></div>
                                     <div class="relative w-full h-full rounded-full overflow-hidden border-2 border-white/25 shadow-inner">
                                         <img id="now-playing-thumb" src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80" alt="" class="w-full h-full object-cover">
                                         <!-- Center Metallic Spindle -->
-                                        <div class="absolute inset-0 m-auto w-7 h-7 rounded-full bg-slate-950 border-2 border-white/40 flex items-center justify-center shadow">
-                                            <div class="w-2 h-2 rounded-full bg-white/80"></div>
+                                        <div class="absolute inset-0 m-auto w-5 h-5 sm:w-7 sm:h-7 rounded-full bg-slate-950 border-2 border-white/40 flex items-center justify-center shadow">
+                                            <div class="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-white/80"></div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
 
                             <!-- Radio Broadcast Info & Animated Spectrum Visualizer -->
-                            <div class="min-w-0 flex-1 w-full text-center sm:text-left">
+                            <div class="min-w-0 flex-1 text-left">
                                 <!-- Top Broadcast Status Badges -->
-                                <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-2">
-                                    <span id="radio-on-air-badge" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/15 border border-white/20 text-[10px] font-extrabold uppercase tracking-widest text-white">
+                                <div class="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-1.5 sm:mb-2">
+                                    <span id="radio-on-air-badge" class="inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-0.5 rounded-full bg-white/15 border border-white/20 text-[9.5px] sm:text-[10px] font-extrabold uppercase tracking-widest text-white">
                                         <span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
                                         CHỜ PHÁT SÓNG
                                     </span>
-                                    <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/25 border border-indigo-400/30 text-[10px] font-mono-num font-bold text-indigo-200 tracking-wider">
+                                    <span class="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/25 border border-indigo-400/30 text-[10px] font-mono-num font-bold text-indigo-200 tracking-wider">
                                         FM 102.4 • RADIO
                                     </span>
                                     <span id="radio-fallback-badge" class="hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-400/35 text-[10px] font-bold text-emerald-200">
@@ -445,16 +438,16 @@
                                 </div>
 
                                 <!-- Song Title & Artist -->
-                                <h4 id="radio-mode-title" class="font-extrabold text-base sm:text-lg text-white leading-snug line-clamp-2">
+                                <h4 id="radio-mode-title" class="font-extrabold text-sm sm:text-lg text-white leading-snug line-clamp-2">
                                     Chế độ Radio đã sẵn sàng
                                 </h4>
-                                <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-1 text-xs text-white/75">
-                                    <span id="radio-mode-author" class="truncate font-medium">Gõ tên bài hát phía trên để bắt đầu lên sóng</span>
-                                    <span id="radio-mode-adder"></span>
+                                <div class="flex flex-wrap items-center gap-1.5 sm:gap-2 mt-0.5 sm:mt-1 text-[11px] sm:text-xs text-white/75">
+                                    <span id="radio-mode-author" class="truncate font-medium max-w-full">Gõ tên bài hát phía trên để bắt đầu</span>
+                                    <span id="radio-mode-adder" class="hidden sm:inline-flex"></span>
                                 </div>
 
                                 <!-- 24-Bar Radio Frequency Visualizer -->
-                                <div id="radio-visualizer" class="radio-visualizer paused mt-3.5 justify-center sm:justify-start" aria-hidden="true">
+                                <div id="radio-visualizer" class="radio-visualizer paused mt-2.5 sm:mt-3.5 justify-start" aria-hidden="true">
                                     <span class="radio-wave-bar" style="--d:0.65s;--delay:0.05s;--h:18px"></span>
                                     <span class="radio-wave-bar" style="--d:0.95s;--delay:0.12s;--h:26px"></span>
                                     <span class="radio-wave-bar" style="--d:0.75s;--delay:0.22s;--h:20px"></span>
@@ -482,7 +475,7 @@
                                 </div>
 
                                 <!-- Up Next Preview Pill -->
-                                <div id="radio-up-next" class="mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/10 text-[11px] text-white/80 max-w-full">
+                                <div id="radio-up-next" class="hidden sm:inline-flex mt-3 items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/10 text-[11px] text-white/80 max-w-full">
                                     <span class="font-bold text-indigo-300 flex-shrink-0">Tiếp theo:</span>
                                     <span id="radio-up-next-title" class="truncate">Chưa có bài kế tiếp trong hàng đợi</span>
                                 </div>
@@ -491,7 +484,7 @@
                     </div>
 
                     <!-- SYNCED LYRICS MODE DECK (Real-time Karaoke Highlight) -->
-                    <div id="lyrics-mode-deck" class="hidden lyrics-deck p-4 sm:p-5">
+                    <div id="lyrics-mode-deck" class="hidden lyrics-deck p-3.5 sm:p-5">
                         <div id="lyrics-mode-bg" class="absolute inset-0 bg-cover bg-center scale-110 blur-2xl opacity-30 transition-all duration-700 pointer-events-none"></div>
                         <div class="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-indigo-950/75 to-slate-950/90 pointer-events-none"></div>
 
@@ -511,10 +504,10 @@
                                         Chờ nhạc
                                     </span>
                                     <!-- Fine-tune MV intro sync offset -->
-                                    <div id="lyrics-offset-controls" class="hidden inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-mono-num text-white/85" title="Chỉnh lệch nhịp lời (khi MV có đoạn mở đầu)">
-                                        <button type="button" id="btn-lyrics-offset-minus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời sớm hơn 0.5s">−0.5s</button>
-                                        <span id="lyrics-offset-value" class="px-1 text-indigo-200 font-bold">0s</span>
-                                        <button type="button" id="btn-lyrics-offset-plus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời chậm hơn 0.5s">+0.5s</button>
+                                    <div id="lyrics-offset-controls" class="hidden inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 border border-white/15 text-[10px] font-mono-num text-white/85" title="Chỉnh lệch nhịp lời (giữ Shift để chỉnh ±2s)">
+                                        <button type="button" id="btn-lyrics-offset-minus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời chậm hơn 0.5s (Shift+bấm: −2s)">−0.5s</button>
+                                        <span id="lyrics-offset-value" class="px-1 text-indigo-200 font-bold cursor-pointer hover:text-white" title="Bấm để đặt lại 0s">0s</span>
+                                        <button type="button" id="btn-lyrics-offset-plus" class="px-1.5 hover:text-indigo-300 font-bold" title="Lời sớm hơn 0.5s (Shift+bấm: +2s)">+0.5s</button>
                                     </div>
                                 </div>
                             </div>
@@ -571,24 +564,39 @@
                             </div>
                         </div>
 
-                        <!-- Progress Scrubber -->
+                        <!-- Autoplay Policy Unlock Banner (Shown only when browser blocks unmuted autoplay) -->
+                        <button type="button" id="autoplay-unlock-banner"
+                            class="hidden mt-3 w-full flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-700 dark:text-amber-300 text-xs font-bold transition cursor-pointer">
+                            <span>🔇</span>
+                            <span>Trình duyệt đang chặn tự phát nhạc — Bấm vào đây để bật âm thanh cùng phòng</span>
+                        </button>
+
+                        <!-- Progress Scrubber (Personal Local Seek) -->
                         <div class="mt-4 flex items-center gap-3">
                             <span id="player-time-current" class="text-[11px] font-mono-num text-sub w-11 text-right flex-shrink-0">00:00</span>
                             <input type="range" id="player-progress-bar" min="0" max="100" value="0" step="0.1"
-                                class="studio-range flex-1">
+                                class="studio-range flex-1" title="Tua nhanh (chỉ áp dụng trên máy bạn)">
                             <span id="player-time-duration" class="text-[11px] font-mono-num text-sub w-11 flex-shrink-0">00:00</span>
                         </div>
 
                         <!-- Bottom Controls Row -->
                         <div class="mt-3.5 flex flex-wrap items-center justify-between gap-3">
-                            <div class="flex items-center gap-2.5">
-                                <!-- Play / Pause Glowing Orb -->
+                            <div class="flex flex-wrap items-center gap-2">
+                                <!-- Play / Pause Glowing Orb (Local-only on this device) -->
                                 <button type="button" id="btn-play-pause"
                                     class="btn-gradient w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0"
-                                    title="Phát / Tạm dừng đồng bộ cả phòng">
+                                    title="Phát / Tạm dừng (chỉ trên máy bạn, không ảnh hưởng người khác)">
                                     <svg id="play-btn-icon" class="w-5 h-5" viewBox="0 0 24 24">
                                         <path d="M8 5.14v14l11-7-11-7z" fill="currentColor"/>
                                     </svg>
+                                </button>
+
+                                <!-- Resync back to Live Room Timestamp (Shown only when locally paused or scrubbed) -->
+                                <button type="button" id="btn-sync-live"
+                                    class="hidden px-3 py-2 rounded-full text-xs font-bold bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-300 border border-rose-500/35 inline-flex items-center gap-1.5 transition"
+                                    title="Nhảy về đúng đoạn nhạc phòng đang phát trực tiếp">
+                                    <span class="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                                    <span>Về trực tiếp</span>
                                 </button>
 
                                 <!-- Majority Skip Vote Button (>= 50% members) -->
@@ -602,12 +610,12 @@
                             </div>
 
                             <!-- Local Volume -->
-                            <div class="flex items-center gap-2 surface-subtle px-3 py-1.5 rounded-full">
+                            <div class="flex items-center gap-2 surface-subtle px-2.5 sm:px-3 py-1.5 rounded-full">
                                 <button type="button" id="btn-toggle-mute" class="text-sub hover:text-main transition" title="Tắt / Bật âm thanh cá nhân">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
                                 </button>
                                 <input type="range" id="player-volume-slider" min="0" max="100" value="80"
-                                    class="studio-range w-20 sm:w-24" title="Âm lượng cá nhân">
+                                    class="studio-range w-16 sm:w-24" title="Âm lượng cá nhân">
                             </div>
                         </div>
                     </div>
@@ -632,24 +640,26 @@
                             </div>
                         </div>
                     </div>
-                    <div id="quick-suggestions-chips" class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 cursor-grab active:cursor-grabbing select-none">
+                    <div id="quick-suggestions-chips" class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 cursor-grab active:cursor-grabbing select-none touch-pan-x">
                         <!-- Populated via initQuickSuggestions() / loadRelatedSuggestionsForTrack() -->
                     </div>
                 </section>
 
                 <!-- FIFO PLAYLIST QUEUE & HISTORY -->
-                <section class="surface-card rounded-3xl p-4 md:p-5">
-                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <section class="surface-card rounded-3xl p-3.5 sm:p-4 md:p-5">
+                    <div class="flex items-center justify-between gap-2 mb-3.5 sm:mb-4">
                         <div class="segmented-track p-1 rounded-xl inline-flex gap-1">
-                            <button type="button" id="tab-btn-queue" class="segmented-btn active px-3.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-2">
-                                <span>Hàng đợi phát (FIFO)</span>
+                            <button type="button" id="tab-btn-queue" class="segmented-btn active px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5">
+                                <span class="sm:hidden">Hàng đợi</span>
+                                <span class="hidden sm:inline">Hàng đợi phát (FIFO)</span>
                                 <span id="queue-count-badge" class="px-1.5 py-0.2 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[11px] font-mono-num">0</span>
                             </button>
-                            <button type="button" id="tab-btn-history" class="segmented-btn px-3.5 py-1.5 rounded-lg text-xs font-bold">
-                                Lịch sử đã phát
+                            <button type="button" id="tab-btn-history" class="segmented-btn px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-bold">
+                                <span class="sm:hidden">Lịch sử</span>
+                                <span class="hidden sm:inline">Lịch sử đã phát</span>
                             </button>
                         </div>
-                        <span id="queue-duration-badge" class="text-[11px] font-medium text-dim">Phát theo thứ tự thêm</span>
+                        <span id="queue-duration-badge" class="text-[11px] font-medium text-dim truncate">Phát FIFO</span>
                     </div>
 
                     <!-- LIVE SONG PRIORITY VOTE BANNER -->
@@ -707,8 +717,11 @@
 
             </div>
 
-            <!-- RIGHT SIDEBAR: REALTIME CHAT & MEMBERS (COLLAPSIBLE) -->
-            <aside id="chat-sidebar" class="w-full lg:w-[370px] xl:w-[400px] surface-card border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[44vh] lg:h-full min-h-0 overflow-hidden z-20 transition-all duration-200">
+            <!-- MOBILE CHAT BACKDROP (Tap outside sheet to close on phones/tablets) -->
+            <div id="mobile-chat-backdrop" class="hidden lg:hidden fixed inset-0 z-30 bg-black/50 backdrop-blur-[2px]"></div>
+
+            <!-- RIGHT SIDEBAR (Desktop) / FULL-HEIGHT BOTTOM SHEET DRAWER (Mobile < lg) -->
+            <aside id="chat-sidebar" class="fixed inset-x-0 bottom-0 top-12 lg:static lg:inset-auto w-full lg:w-[370px] xl:w-[400px] surface-card rounded-t-3xl lg:rounded-none border-t lg:border-t-0 lg:border-l border-theme flex flex-col flex-shrink-0 h-[calc(100dvh-3rem)] lg:h-full min-h-0 overflow-hidden z-40 lg:z-20 transition-all duration-200">
 
                 <!-- Segmented Sidebar Tabs + Minimize Button -->
                 <div class="p-3 border-b border-theme flex items-center justify-between gap-2 flex-shrink-0">
@@ -724,30 +737,30 @@
                     </div>
 
                     <!-- Minimize Chat Button -->
-                    <button type="button" id="btn-minimize-chat" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center text-sub hover:text-main flex-shrink-0" title="Thu nhỏ cuộc trò chuyện">
+                    <button type="button" id="btn-minimize-chat" class="surface-subtle w-9 h-9 rounded-xl flex items-center justify-center text-sub hover:text-main flex-shrink-0" title="Đóng khung trò chuyện">
                         <svg class="w-4 h-4 hidden lg:block" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
-                        <svg class="w-4 h-4 lg:hidden" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                        <svg class="w-4 h-4 lg:hidden" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
                     </button>
                 </div>
 
                 <!-- CHAT PANE -->
                 <div id="tab-pane-chat" class="relative flex-1 min-h-0 flex flex-col overflow-hidden">
-                    <div id="chat-messages-container" class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3.5 space-y-1"></div>
+                    <div id="chat-messages-container" class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-3.5 space-y-1"></div>
 
-                    <!-- ANIMATED STICKER (NHÃN DÁN) PICKER POPOVER -->
-                    <div id="sticker-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
-                        <div class="flex items-center gap-2 mb-2">
+                    <!-- ANIMATED STICKER (NHÃN DÁN) PICKER POPOVER (Never clips vertically!) -->
+                    <div id="sticker-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[106px] max-h-[calc(100%-116px)] flex flex-col surface-dropdown rounded-2xl p-3 z-50">
+                        <div class="flex items-center gap-2 mb-2 flex-shrink-0">
                             <div class="relative flex-1">
                                 <input type="text" id="sticker-search-input" autocomplete="off"
-                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-xs font-medium"
-                                    placeholder="Tìm nhãn dán (cute, cat, love, music...)">
+                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-base sm:text-xs font-medium"
+                                    placeholder="Tìm nhãn dán (cute, cat, love...)">
                                 <span id="sticker-search-spinner" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-indigo-500">
                                     <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                                 </span>
                             </div>
                             <button type="button" id="btn-close-sticker-picker" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
                         </div>
-                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2">
+                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2 flex-shrink-0">
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">✨ Nổi bật</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cute cat">🐱 Cute</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music dance">🎵 Nhạc</button>
@@ -755,18 +768,18 @@
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="funny laugh">😂 Hài</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="party hype">🔥 Quẩy</button>
                         </div>
-                        <div id="sticker-results-grid" class="grid grid-cols-3 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                        <div id="sticker-results-grid" class="grid grid-cols-3 gap-1.5 flex-1 min-h-0 max-h-56 overflow-y-auto pr-0.5">
                             <!-- Populated dynamically -->
                         </div>
                     </div>
 
-                    <!-- GIF PICKER POPOVER -->
-                    <div id="gif-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[112px] surface-dropdown rounded-2xl p-3 z-40">
-                        <div class="flex items-center gap-2 mb-2">
+                    <!-- GIF PICKER POPOVER (Never clips vertically!) -->
+                    <div id="gif-picker-popover" class="hidden search-dropdown-anim absolute left-2.5 right-2.5 bottom-[106px] max-h-[calc(100%-116px)] flex flex-col surface-dropdown rounded-2xl p-3 z-50">
+                        <div class="flex items-center gap-2 mb-2 flex-shrink-0">
                             <div class="relative flex-1">
                                 <input type="text" id="gif-search-input" autocomplete="off"
-                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-xs font-medium"
-                                    placeholder="Tìm ảnh GIF (dance, cat, anime, meme...)">
+                                    class="input-field w-full pl-3 pr-7 py-1.5 rounded-xl text-base sm:text-xs font-medium"
+                                    placeholder="Tìm ảnh GIF (dance, cat, meme...)">
                                 <span id="gif-search-spinner" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-indigo-500">
                                     <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-85" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                                 </span>
@@ -774,7 +787,7 @@
                             <button type="button" id="btn-close-gif-picker" class="w-7 h-7 rounded-full surface-subtle text-sub hover:text-main flex items-center justify-center text-xs flex-shrink-0">✕</button>
                         </div>
                         <!-- Diverse Quick GIF Filter Chips -->
-                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2">
+                        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2 flex-shrink-0">
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">🔥 Nổi bật</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cat dance">🐱 Mèo</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music vibe">🎵 Quẩy</button>
@@ -786,7 +799,7 @@
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="applause clap">👏 Vỗ tay</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="party celebration">🥳 Party</button>
                         </div>
-                        <div id="gif-results-grid" class="grid grid-cols-2 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                        <div id="gif-results-grid" class="grid grid-cols-2 gap-1.5 flex-1 min-h-0 max-h-56 overflow-y-auto pr-0.5">
                             <!-- Populated dynamically -->
                         </div>
                     </div>
@@ -815,8 +828,8 @@
                         <button type="button" class="reaction-pill-btn hover:scale-125 active:scale-95 transition-transform text-lg px-1.5 py-0.5 rounded-lg hover:bg-indigo-500/10" data-emoji="😂" title="Haha">😂</button>
                     </div>
 
-                    <!-- Rich Chat Composer (Emoji + GIF + Image Upload + Text) -->
-                    <form id="chat-input-form" class="p-2.5 border-t border-theme flex-shrink-0">
+                    <!-- Rich Chat Composer (Sticker + GIF + Image Upload + Text) -->
+                    <form id="chat-input-form" class="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-theme flex-shrink-0">
                         <input type="file" id="chat-image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
                         <div class="flex items-center gap-1.5">
                             <!-- Media Buttons (Sticker + GIF + Image Upload) -->
@@ -833,8 +846,8 @@
                             <!-- Text Input + Send Button -->
                             <div class="relative flex-1 flex items-center min-w-0">
                                 <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
-                                    class="input-field w-full pl-3.5 pr-10 py-2 rounded-full text-xs md:text-sm"
-                                    placeholder="Nhắn tin, dán ảnh...">
+                                    class="input-field w-full pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm"
+                                    placeholder="Nhắn tin...">
                                 <button type="submit" id="btn-chat-send"
                                     class="btn-gradient absolute right-1 w-8 h-8 rounded-full flex items-center justify-center"
                                     title="Gửi tin nhắn">
@@ -856,9 +869,10 @@
 
         <!-- FLOATING EXPAND CHAT BUTTON (Shown when Chat Sidebar is minimized) -->
         <button type="button" id="btn-expand-chat-fab"
-            class="hidden fixed bottom-5 right-5 z-30 btn-gradient pl-4 pr-4 py-3 rounded-full shadow-2xl flex items-center gap-2 text-xs font-bold">
+            class="hidden fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 sm:bottom-5 sm:right-5 z-30 btn-gradient px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-full shadow-2xl flex items-center gap-2 text-xs font-bold">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
-            <span>Mở trò chuyện</span>
+            <span class="sm:hidden">Chat</span>
+            <span class="hidden sm:inline">Mở trò chuyện</span>
             <span class="js-chat-unread-badge hidden min-w-[20px] h-[20px] px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center">0</span>
         </button>
     </div>
@@ -920,9 +934,9 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/socket.js?v=2.14"></script>
-    <script src="/static/js/player.js?v=2.14"></script>
-    <script src="/static/js/chat.js?v=2.14"></script>
-    <script src="/static/js/app.js?v=2.14"></script>
+    <script src="/static/js/socket.js?v=2.22"></script>
+    <script src="/static/js/player.js?v=2.22"></script>
+    <script src="/static/js/chat.js?v=2.22"></script>
+    <script src="/static/js/app.js?v=2.22"></script>
 </body>
 </html>

@@ -56,6 +56,7 @@ from services.security import (
 )
 from services.youtube import (
     extract_video_id,
+    get_cached_related_videos,
     get_related_videos,
     get_video_info,
     get_youtube_cache_stats,
@@ -112,10 +113,34 @@ def store_chat_media(raw: bytes, mime: str, uploader_id: str) -> str:
     return media_id
 
 
+def schedule_prewarm_room_related(room: "Room"):
+    """Proactively pre-warm YouTube related tracks for current_track and #1 Up-Next in background."""
+    vids: List[str] = []
+    if room.current_track and room.current_track.id:
+        vids.append(room.current_track.id)
+    if room.queue and room.queue[0].id and room.queue[0].id not in vids:
+        vids.append(room.queue[0].id)
+    if not vids:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for vid in vids:
+        if get_cached_related_videos(vid) is None:
+            loop.create_task(get_related_videos(vid, limit=14))
+
+
+async def _startup_prewarm():
+    await warmup_youtube_connection()
+    for r in list(rooms.values()):
+        schedule_prewarm_room_related(r)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     start_keep_alive()
-    asyncio.create_task(warmup_youtube_connection())
+    asyncio.create_task(_startup_prewarm())
     yield
     db.close()
 
@@ -365,6 +390,36 @@ class Room:
             return self.current_time + elapsed
         return self.current_time
 
+    def catch_up_if_expired(self) -> bool:
+        """Advance past already-finished tracks (e.g. after room was empty/restarted). Caller holds lock."""
+        changed = False
+        now = time.time()
+        guard = 0
+        while (
+            self.status == "playing"
+            and self.current_track
+            and self.current_track.duration > 0
+            and guard < 50
+        ):
+            elapsed = max(0.0, now - self.updated_at)
+            pos = self.current_time + elapsed
+            dur = float(self.current_track.duration)
+            if pos < dur:
+                break
+            overflow = pos - dur
+            finished = self.current_track.to_dict()
+            next_t = self.advance_track()
+            db.schedule_add_history(self.id, finished)
+            if next_t:
+                self.updated_at = now - overflow
+                self.current_time = 0.0
+            changed = True
+            guard += 1
+        if changed:
+            db.schedule_save_room(self.to_db_record())
+            db.schedule_replace_queue(self.id, [t.to_dict() for t in self.queue])
+        return changed
+
     @staticmethod
     def _calc_majority_needed(total: int) -> int:
         if total <= 1:
@@ -456,6 +511,8 @@ class Room:
         return target
 
     def to_dict(self, include_invite: bool = False):
+        now = time.time()
+        synced_time = self.get_synced_time()
         data = {
             "id": self.id,
             "name": self.name,
@@ -465,8 +522,11 @@ class Room:
             "is_private": self.is_private,
             "has_passcode": bool(self.passcode_hash),
             "status": self.status,
-            "current_time": self.get_synced_time(),
-            "updated_at": self.updated_at,
+            "current_time": synced_time,
+            # IMPORTANT: updated_at in serialized snapshot matches synced_time's instant (now)
+            # so clients never double-count elapsed time on join!
+            "updated_at": now,
+            "server_time": now,
             "state_version": self.state_version,
             "current_track": self.current_track.to_dict() if self.current_track else None,
             "queue": [t.to_dict() for t in self.queue],
@@ -475,6 +535,11 @@ class Room:
             "user_count": len(self.users),
             "skip_vote": self.get_skip_state(),
             "priority_request": self.get_priority_state(),
+            "related_suggestions": (
+                get_cached_related_videos(self.current_track.id, limit=14)
+                if self.current_track
+                else None
+            ),
         }
         if include_invite and self.is_private:
             data["invite_token"] = self.invite_token
@@ -1390,6 +1455,7 @@ async def websocket_room_endpoint(
                     room.user_sockets[user_id] = websocket
                     room.last_empty_at = None
                     joined = True
+                    room.catch_up_if_expired()
 
                     is_host = room.is_host(user_id)
                     init_payload = {
@@ -1414,6 +1480,7 @@ async def websocket_room_endpoint(
                     skip_snapshot = room.get_skip_state()
                     priority_snapshot = room.get_priority_state()
                     invalidate_rooms_cache()
+                    schedule_prewarm_room_related(room)
 
                 await websocket.send_json(init_payload)
                 await room.broadcast({
@@ -1533,6 +1600,12 @@ async def websocket_room_endpoint(
                 )
 
                 async with room.lock:
+                    if room.dj_mode and not room.is_host(user_id):
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Chế độ DJ đang bật: Chỉ Chủ phòng (Host) mới được thêm bài hát",
+                        })
+                        continue
                     if room.current_track is not None:
                         if len(room.queue) >= MAX_QUEUE_SIZE:
                             await websocket.send_json({"type": "error", "message": f"Hàng đợi đã đầy (tối đa {MAX_QUEUE_SIZE} bài)"})
@@ -1567,12 +1640,15 @@ async def websocket_room_endpoint(
                             "status": room.status,
                             "current_time": room.current_time,
                             "updated_at": room.updated_at,
+                            "server_time": room.updated_at,
                             "queue": [t.to_dict() for t in room.queue],
                             "skip_vote": room.get_skip_state(),
                             "priority_request": room.get_priority_state(),
+                            "related_suggestions": get_cached_related_videos(room.current_track.id, limit=14),
                             "message": sys_msg,
                         }
                         invalidate_rooms_cache()
+                        schedule_prewarm_room_related(room)
                         db.schedule_save_room(room.to_db_record())
                         db.schedule_add_message(room.id, sys_msg)
                     else:
@@ -1594,6 +1670,8 @@ async def websocket_room_endpoint(
                             "queue": [t.to_dict() for t in room.queue],
                             "message": sys_msg,
                         }
+                        if position == 1:
+                            schedule_prewarm_room_related(room)
                         db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
                         db.schedule_add_message(room.id, sys_msg)
 
@@ -1630,6 +1708,7 @@ async def websocket_room_endpoint(
                                 "priority_request": room.get_priority_state(),
                                 "message": sys_msg,
                             }
+                            schedule_prewarm_room_related(room)
                             db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
                             db.schedule_add_message(room.id, sys_msg)
                         else:
@@ -1673,12 +1752,13 @@ async def websocket_room_endpoint(
                         "queue": [t.to_dict() for t in room.queue],
                         "priority_request": room.get_priority_state(),
                     }
+                    schedule_prewarm_room_related(room)
                     db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
 
                 await room.broadcast(payload)
 
             # ----------------------------------------------------------------
-            # 7. PLAYBACK CONTROL (DJ MODE ENFORCED, CLAMPED TIME, LOCKED)
+            # 7. PLAYBACK CONTROL — HOST-ONLY MASTER SYNC (MEMBERS ARE LOCAL-ONLY)
             # ----------------------------------------------------------------
             elif action == "control":
                 allowed, _ = rate_limiter.allow(f"ws_ctrl:{user_id}", limit=12, window_sec=10)
@@ -1690,10 +1770,10 @@ async def websocket_room_endpoint(
                     continue
 
                 async with room.lock:
-                    if room.dj_mode and not room.is_host(user_id):
+                    if not room.is_host(user_id):
                         await websocket.send_json({
                             "type": "error",
-                            "message": "Chế độ DJ đang bật: Chỉ Chủ phòng (Host) mới được điều khiển phát nhạc",
+                            "message": "Chỉ Chủ phòng (Host) mới điều khiển nhạc cả phòng — thao tác của bạn chỉ áp dụng riêng trên máy bạn",
                         })
                         continue
 
@@ -1711,24 +1791,26 @@ async def websocket_room_endpoint(
                     if room.current_track.duration > 0:
                         parsed_time = min(parsed_time, float(room.current_track.duration))
 
+                    now = time.time()
                     if sub_action == "play":
                         room.status = "playing"
                         room.current_time = parsed_time
-                        room.updated_at = time.time()
+                        room.updated_at = now
                     elif sub_action == "pause":
                         room.status = "paused"
                         room.current_time = parsed_time
-                        room.updated_at = time.time()
+                        room.updated_at = now
                     elif sub_action == "seek":
                         room.current_time = parsed_time
-                        room.updated_at = time.time()
+                        room.updated_at = now
 
                     payload = {
                         "type": "playback_sync",
                         "status": room.status,
                         "current_time": room.current_time,
                         "updated_at": room.updated_at,
-                        "by_user": current_user.name if current_user else "Người dùng",
+                        "server_time": now,
+                        "by_user": current_user.name if current_user else "Chủ phòng",
                         "sub_action": sub_action,
                     }
                     db.schedule_save_room(room.to_db_record())
@@ -1753,11 +1835,12 @@ async def websocket_room_endpoint(
                         continue
 
                     should_advance = False
-                    if room.is_host(user_id):
-                        should_advance = True
-                    elif ct.duration > 0:
+                    if ct.duration > 0:
+                        # Enforce server clock even for Host so local seeking to end never skips room early!
                         if room.get_synced_time() >= max(0.0, float(ct.duration) - 6.0):
                             should_advance = True
+                    elif room.is_host(user_id):
+                        should_advance = True
                     else:
                         room.ended_reports.add(user_id)
                         active_reports = [u for u in room.ended_reports if u in room.users]
@@ -1784,13 +1867,16 @@ async def websocket_room_endpoint(
                             "status": room.status,
                             "current_time": 0.0,
                             "updated_at": room.updated_at,
+                            "server_time": room.updated_at,
                             "queue": [t.to_dict() for t in room.queue],
                             "history": [t.to_dict() for t in room.history[-10:]],
                             "skip_vote": room.get_skip_state(),
                             "priority_request": room.get_priority_state(),
+                            "related_suggestions": get_cached_related_videos(next_t.id, limit=14) if next_t else None,
                             "message": sys_msg,
                         }
                         invalidate_rooms_cache()
+                        schedule_prewarm_room_related(room)
                         db.schedule_add_history(room.id, finished_track_dict)
                         db.schedule_save_room(room.to_db_record())
                         db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
@@ -1879,6 +1965,7 @@ async def websocket_room_endpoint(
                                     }
                                     db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
                                     db.schedule_add_message(room.id, sys_msg)
+                                    schedule_prewarm_room_related(room)
                             elif count == 0:
                                 room.priority_request = None
                                 payload = {
@@ -1991,13 +2078,16 @@ async def websocket_room_endpoint(
                                 "status": room.status,
                                 "current_time": 0.0,
                                 "updated_at": room.updated_at,
+                                "server_time": room.updated_at,
                                 "queue": [t.to_dict() for t in room.queue],
                                 "history": [t.to_dict() for t in room.history[-10:]],
                                 "skip_vote": room.get_skip_state(),
                                 "priority_request": room.get_priority_state(),
+                                "related_suggestions": get_cached_related_videos(next_t.id, limit=14) if next_t else None,
                                 "message": sys_msg,
                             }
                             invalidate_rooms_cache()
+                            schedule_prewarm_room_related(room)
                             db.schedule_add_history(room.id, finished_track_dict)
                             db.schedule_save_room(room.to_db_record())
                             db.schedule_replace_queue(room.id, [t.to_dict() for t in room.queue])
@@ -2035,7 +2125,11 @@ async def websocket_room_endpoint(
                         await websocket.send_json({"type": "error", "message": "Chỉ Chủ phòng (Host) mới được bật/tắt chế độ DJ"})
                         continue
                     room.dj_mode = not room.dj_mode
-                    mode_text = "BẬT (Chỉ Host mới có quyền chỉnh nhạc)" if room.dj_mode else "TẮT (Mọi người đều có thể chỉnh nhạc)"
+                    mode_text = (
+                        "BẬT (Chỉ Chủ phòng mới được thêm bài hát vào hàng đợi)"
+                        if room.dj_mode
+                        else "TẮT (Mọi người đều có thể thêm bài hát vào hàng đợi)"
+                    )
                     sys_msg = {
                         "id": secrets.token_hex(4),
                         "type": "system",

@@ -597,64 +597,98 @@ def _extract_related_from_next_json(data: Any, source_video_id: str, limit: int 
     return combined[:limit]
 
 
-async def _fetch_related_innertube(video_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+async def _fetch_related_innertube(video_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Fetch related Music Mix tracks via lightweight MWEB Innertube (~40% smaller & faster than WEB), with WEB fallback."""
     client = _get_http_client()
-    payload = {
-        "context": {
-            "client": {
-                "clientName": "WEB",
-                "clientVersion": "2.20240726.00.00",
-                "hl": "vi",
-                "gl": "VN",
-            }
-        },
-        "videoId": video_id,
-        "playlistId": f"RD{video_id}",
-    }
-    try:
-        resp = await client.post(
+    endpoints = [
+        (
+            "https://m.youtube.com/youtubei/v1/next?prettyPrint=false",
+            {
+                "context": {
+                    "client": {
+                        "clientName": "MWEB",
+                        "clientVersion": "2.20240726.00.00",
+                        "hl": "vi",
+                        "gl": "VN",
+                    }
+                },
+                "videoId": video_id,
+                "playlistId": f"RD{video_id}",
+            },
+            MWEB_HEADERS,
+            4.0,
+        ),
+        (
             "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
-            json=payload,
-            headers=WEB_HEADERS,
-            timeout=6.0,
-        )
-        if resp.status_code == 200:
-            return _extract_related_from_next_json(resp.json(), video_id, limit=limit)
-    except Exception as e:
-        print(f"[youtube related fetch error] {e}")
+            {
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": "2.20240726.00.00",
+                        "hl": "vi",
+                        "gl": "VN",
+                    }
+                },
+                "videoId": video_id,
+                "playlistId": f"RD{video_id}",
+            },
+            WEB_HEADERS,
+            5.0,
+        ),
+    ]
+    for url, payload, hdrs, timeout_sec in endpoints:
+        try:
+            resp = await client.post(url, json=payload, headers=hdrs, timeout=timeout_sec)
+            if resp.status_code == 200:
+                parsed = _extract_related_from_next_json(resp.json(), video_id, limit=limit)
+                if parsed:
+                    return parsed
+        except Exception as e:
+            print(f"[youtube related fetch error] {e}")
     return []
 
 
-async def get_related_videos(video_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Fetch musically-related YouTube tracks for a video ID (LRU+TTL cached & deduplicated)."""
+def get_cached_related_videos(video_id: str, limit: int = 14) -> Optional[List[Dict[str, Any]]]:
+    """O(1) non-blocking RAM cache lookup for instant embedding in WS payloads."""
+    clean_id = extract_video_id(video_id)
+    if not clean_id:
+        return None
+    cached = yt_related_cache.get(clean_id)
+    if cached is not None:
+        return cached[:limit]
+    return None
+
+
+async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, Any]]:
+    """Fetch musically-related YouTube tracks for a video ID (unified per-video cache & deduplicated)."""
     clean_id = extract_video_id(video_id)
     if not clean_id:
         return []
 
-    cache_key = f"{clean_id}:{limit}"
-    cached = yt_related_cache.get(cache_key)
+    cached = yt_related_cache.get(clean_id)
     if cached is not None:
-        return cached
+        return cached[:limit]
 
-    existing = _inflight_related.get(cache_key)
+    existing = _inflight_related.get(clean_id)
     if existing and not existing.done():
         try:
-            return await existing
+            items = await existing
+            return items[:limit]
         except Exception:
             pass
 
-    task = asyncio.create_task(_fetch_related_innertube(clean_id, limit=limit))
-    _inflight_related[cache_key] = task
+    task = asyncio.create_task(_fetch_related_innertube(clean_id, limit=max(20, limit)))
+    _inflight_related[clean_id] = task
     try:
         items = await task
     finally:
-        if _inflight_related.get(cache_key) is task:
-            _inflight_related.pop(cache_key, None)
+        if _inflight_related.get(clean_id) is task:
+            _inflight_related.pop(clean_id, None)
 
     if items:
-        yt_related_cache.set(cache_key, items)
+        yt_related_cache.set(clean_id, items)
         for it in items:
             vid = it.get("id")
             if vid:
                 yt_info_cache.set(vid, it)
-    return items
+    return items[:limit]

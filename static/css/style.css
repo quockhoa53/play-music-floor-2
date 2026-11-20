@@ -281,6 +281,7 @@ input[type="range"].studio-range {
   border-radius: 9999px;
   background: var(--slider-track);
   cursor: pointer;
+  touch-action: none;
   transition: height 0.15s ease;
 }
 input[type="range"].studio-range:hover {
@@ -307,6 +308,21 @@ input[type="range"].studio-range::-moz-range-thumb {
   background: #ffffff;
   border: 2.5px solid var(--accent-primary);
   box-shadow: 0 2px 8px rgba(79, 70, 229, 0.45);
+}
+
+/* Larger finger-friendly slider thumb on touch devices */
+@media (pointer: coarse) {
+  input[type="range"].studio-range {
+    height: 7px;
+  }
+  input[type="range"].studio-range::-webkit-slider-thumb {
+    width: 18px;
+    height: 18px;
+  }
+  input[type="range"].studio-range::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+  }
 }
 
 /* ============================================================================
@@ -472,9 +488,10 @@ input[type="range"].studio-range::-moz-range-thumb {
 @media (max-width: 640px) {
   #toast-container {
     bottom: auto;
-    top: 68px;
+    top: max(10px, env(safe-area-inset-top));
     left: 50%;
     transform: translateX(-50%);
+    width: min(340px, calc(100vw - 24px));
     flex-direction: column;
   }
 }
@@ -573,17 +590,20 @@ html.dark .toast-item {
    RADIO MODE — INVISIBLE YOUTUBE AUDIO ENGINE & STUDIO RADIO CONSOLE
    ============================================================================ */
 
-/* Never use display:none on YouTube iframe or browsers pause/throttle background audio */
+/* Keep YouTube audio iframe 200x112 off-screen (NEVER display:none so audio keeps playing,
+   and off-screen at left:-9999px so Chromium cross-origin video compositing NEVER paints over the UI!) */
 .yt-audio-engine-hidden {
   position: fixed !important;
-  bottom: 0 !important;
+  top: 0 !important;
   left: -9999px !important;
-  width: 1px !important;
-  height: 1px !important;
+  width: 200px !important;
+  height: 112px !important;
   opacity: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
   pointer-events: none !important;
   overflow: hidden !important;
-  z-index: -1 !important;
+  z-index: -10 !important;
 }
 
 .radio-deck {
@@ -686,9 +706,10 @@ html:not(.dark) .radio-deck {
 }
 
 .lyrics-viewport {
-  height: 270px;
+  position: relative;
+  height: 245px;
   overflow-y: auto;
-  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
   contain: content;
   mask-image: linear-gradient(to bottom, transparent 0%, #000 14%, #000 84%, transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 14%, #000 84%, transparent 100%);
@@ -701,15 +722,22 @@ html:not(.dark) .radio-deck {
 }
 
 .lyric-line {
-  padding: 7px 14px;
+  padding: 6px 12px;
   border-radius: 0.85rem;
-  font-size: 0.96rem;
+  font-size: 0.9rem;
   line-height: 1.5;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.52);
   transform-origin: left center;
   transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s ease, opacity 0.2s ease, background-color 0.2s ease;
   will-change: transform, opacity;
+}
+
+@media (min-width: 640px) {
+  .lyric-line {
+    padding: 7px 14px;
+    font-size: 0.96rem;
+  }
 }
 
 .lyric-line.synced-clickable {
@@ -728,10 +756,16 @@ html:not(.dark) .radio-deck {
 .lyric-line.active {
   color: #ffffff;
   font-weight: 800;
-  font-size: 1.06rem;
+  font-size: 1rem;
   background: rgba(129, 140, 248, 0.18);
   box-shadow: inset 3px 0 0 #a5b4fc;
   transform: translate3d(4px, 0, 0) scale(1.015);
   text-shadow: 0 2px 14px rgba(129, 140, 248, 0.45);
+}
+
+@media (min-width: 640px) {
+  .lyric-line.active {
+    font-size: 1.06rem;
+  }
 }
 

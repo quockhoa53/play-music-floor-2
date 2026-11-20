@@ -20,7 +20,8 @@ window.appState = {
     roomData: null,
     isHost: false,
     isVideoHidden: localStorage.getItem('floor2_video_hidden') === 'true',
-    isChatCollapsed: localStorage.getItem('floor2_chat_collapsed') === 'true',
+    // On mobile (< 1024px), always start with chat sheet closed so the music stage is immediately visible
+    isChatCollapsed: window.innerWidth < 1024 ? true : (localStorage.getItem('floor2_chat_collapsed') === 'true'),
     suggestions: [],
     pendingPrivateRoomId: null,
     pendingImageFile: null,
@@ -622,37 +623,38 @@ async function loadPublicRooms() {
         listContainer.innerHTML = '';
         rooms.forEach(r => {
             const item = document.createElement('div');
-            item.className = 'surface-subtle p-3.5 rounded-2xl flex items-center justify-between gap-3 cursor-pointer group';
+            item.className = 'surface-subtle p-3 sm:p-3.5 rounded-2xl flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer group';
 
             const playingTitle = r.current_track ? r.current_track.title : 'Đang chờ thêm nhạc...';
             const isPlaying = r.status === 'playing';
             const thumbHtml = r.current_track
-                ? `<img src="${safeThumbUrl(r.current_track.id)}" alt="" class="w-12 h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
-                : `<div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-pink-500/20 border border-indigo-500/20 flex items-center justify-center text-indigo-500 dark:text-indigo-300 flex-shrink-0">
-                     <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                ? `<img src="${safeThumbUrl(r.current_track.id)}" alt="" class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
+                : `<div class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-pink-500/20 border border-indigo-500/20 flex items-center justify-center text-indigo-500 dark:text-indigo-300 flex-shrink-0">
+                     <svg class="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
                    </div>`;
 
             const liveBadge = isPlaying
-                ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-wide"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>Live</span>`
-                : `<span class="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-500/10 text-dim text-[10px] font-semibold">Sẵn sàng</span>`;
+                ? `<span class="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-wide flex-shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>Live</span>`
+                : `<span class="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full bg-slate-500/10 text-dim text-[10px] font-semibold flex-shrink-0">Sẵn sàng</span>`;
 
             item.innerHTML = `
-                <div class="flex items-center gap-3.5 min-w-0">
+                <div class="flex items-center gap-2.5 sm:gap-3.5 min-w-0 flex-1">
                     ${thumbHtml}
-                    <div class="min-w-0">
-                        <div class="flex items-center gap-2">
-                            <h4 class="font-bold text-main text-sm truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(r.name)}</h4>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-1.5 min-w-0">
+                            ${isPlaying ? '<span class="sm:hidden w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0"></span>' : ''}
+                            <h4 class="font-bold text-main text-xs sm:text-sm truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(r.name)}</h4>
                             ${liveBadge}
                         </div>
-                        <p class="text-xs text-sub truncate mt-0.5">${escapeHtml(playingTitle)}</p>
+                        <p class="text-[11px] sm:text-xs text-sub truncate mt-0.5">${escapeHtml(playingTitle)}</p>
                     </div>
                 </div>
-                <div class="flex items-center gap-2.5 flex-shrink-0">
-                    <span class="inline-flex items-center gap-1 text-xs font-semibold text-sub px-2.5 py-1 rounded-full surface-subtle">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <div class="flex items-center gap-1.5 sm:gap-2.5 flex-shrink-0">
+                    <span class="inline-flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-sub px-2 sm:px-2.5 py-1 rounded-full surface-subtle">
+                        <svg class="w-3 h-3 sm:w-3.5 sm:h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                         ${parseInt(r.user_count, 10) || 0}
                     </span>
-                    <span class="px-3.5 py-1.5 rounded-xl btn-gradient text-xs font-semibold">
+                    <span class="px-3 sm:px-3.5 py-1.5 rounded-xl btn-gradient text-xs font-semibold">
                         Vào
                     </span>
                 </div>
@@ -780,6 +782,7 @@ async function joinRoom(roomId, inviteToken = null) {
 
 function leaveRoom() {
     window.roomSocket.disconnect();
+    if (window.syncPlayer) window.syncPlayer.reset();
     window.appState.roomId = null;
     window.appState.inviteToken = null;
     window.appState.roomData = null;
@@ -1180,7 +1183,17 @@ function updateSearchHighlight(scrollIntoView = true) {
     });
 }
 
+function canAddTrackInCurrentRoom() {
+    const isDj = !!(window.appState.roomData && window.appState.roomData.dj_mode);
+    if (isDj && !window.appState.isHost) {
+        showToast('Chế độ DJ đang bật: Chỉ Chủ phòng (Host) mới được thêm bài hát', 'warning');
+        return false;
+    }
+    return true;
+}
+
 function addTrackFromSearch(item, idx) {
+    if (!canAddTrackInCurrentRoom()) return;
     window.roomSocket.addTrack(item);
     searchState.addedIds.add(item.id);
 
@@ -1225,6 +1238,7 @@ function initSocketEvents() {
         window.appState.roomData.status = data.status;
         window.appState.roomData.current_time = data.current_time;
         window.appState.roomData.updated_at = data.updated_at;
+        if ('server_time' in data) window.appState.roomData.server_time = data.server_time;
         window.appState.roomData.queue = data.queue || [];
         if (data.history) window.appState.roomData.history = data.history;
         if ('skip_vote' in data) {
@@ -1239,7 +1253,7 @@ function initSocketEvents() {
         renderPriorityBanner(window.appState.roomData.priority_request);
         renderQueue();
         renderHistory();
-        loadRelatedSuggestionsForTrack(window.appState.roomData.current_track);
+        loadRelatedSuggestionsForTrack(window.appState.roomData.current_track, data.related_suggestions || null);
         loadLyricsForTrack(window.appState.roomData.current_track);
         loadRoomQuickSuggestions(window.appState.roomId);
 
@@ -1251,8 +1265,11 @@ function initSocketEvents() {
         window.appState.roomData.status = data.status;
         window.appState.roomData.current_time = data.current_time;
         window.appState.roomData.updated_at = data.updated_at;
+        if ('server_time' in data) window.appState.roomData.server_time = data.server_time;
 
-        window.syncPlayer.syncWithRoomState(window.appState.roomData);
+        window.syncPlayer.syncWithRoomState(window.appState.roomData, {
+            fromHostControl: data.sub_action || null,
+        });
     });
 
     socket.on('queue_updated', (data) => {
@@ -1401,7 +1418,7 @@ function updateRoomUI(room) {
     renderQueue();
     renderHistory();
     renderMembers();
-    loadRelatedSuggestionsForTrack(room.current_track || null);
+    loadRelatedSuggestionsForTrack(room.current_track || null, room.related_suggestions || null);
     loadLyricsForTrack(room.current_track || null);
     loadRoomQuickSuggestions(room.id);
 }
@@ -1519,10 +1536,14 @@ function updateHostControls() {
     const isHost = (window.appState.roomData && window.appState.roomData.host_id === window.appState.userId);
     window.appState.isHost = isHost;
 
+    const isDj = !!(window.appState.roomData && window.appState.roomData.dj_mode);
+
     const hostBadge = document.getElementById('user-role-badge');
     if (hostBadge) {
         if (isHost) {
             hostBadge.innerHTML = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 text-[11px] font-bold">👑 Host</span>`;
+        } else if (isDj) {
+            hostBadge.innerHTML = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 text-[11px] font-bold" title="Chế độ DJ đang bật: Chỉ Chủ phòng được thêm nhạc">🎛️ Chế độ DJ</span>`;
         } else {
             hostBadge.innerHTML = `<span class="inline-flex items-center px-2 py-0.5 rounded-full surface-subtle text-sub text-[11px] font-medium">Thành viên</span>`;
         }
@@ -1531,10 +1552,30 @@ function updateHostControls() {
     const djToggleBtn = document.getElementById('btn-dj-mode-toggle');
     if (djToggleBtn) {
         djToggleBtn.classList.toggle('hidden', !isHost);
-        const isDj = window.appState.roomData && window.appState.roomData.dj_mode;
+        djToggleBtn.classList.toggle('sm:inline-flex', isHost);
         djToggleBtn.innerHTML = isDj
             ? `<span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>DJ: Bật</span>`
             : `<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span><span>DJ: Tắt</span>`;
+    }
+
+    const searchInput = document.getElementById('search-music-input');
+    if (searchInput) {
+        searchInput.placeholder = (isDj && !isHost)
+            ? '🎛️ Chế độ DJ đang bật — Chỉ Chủ phòng được thêm nhạc'
+            : 'Tìm bài hát hoặc dán link YouTube...';
+    }
+
+    const playPauseBtn = document.getElementById('btn-play-pause');
+    if (playPauseBtn) {
+        playPauseBtn.title = isHost
+            ? 'Phát / Tạm dừng đồng bộ cả phòng (Chủ phòng)'
+            : 'Phát / Tạm dừng (chỉ trên máy bạn, không ảnh hưởng người khác)';
+    }
+    const progressBar = document.getElementById('player-progress-bar');
+    if (progressBar) {
+        progressBar.title = isHost
+            ? 'Tua nhạc đồng bộ cả phòng (Chủ phòng)'
+            : 'Tua nhanh (chỉ áp dụng trên máy bạn)';
     }
 }
 
@@ -1562,6 +1603,7 @@ function renderQueue() {
     const queue = (window.appState.roomData && window.appState.roomData.queue) || [];
     if (queueCountBadge) queueCountBadge.textContent = queue.length;
     if (window.syncPlayer) window.syncPlayer.updateUpNext(queue);
+    prefetchRelatedForNextTrack(queue);
 
     const totalSec = queue.reduce((acc, t) => acc + (parseInt(t.duration, 10) || 0), 0);
     if (queueDurationBadge) {
@@ -1590,7 +1632,7 @@ function renderQueue() {
         const hasVotedPriority = isPriorityTarget && Array.isArray(activePriority.voted_users) && activePriority.voted_users.includes(currentUid);
 
         const item = document.createElement('div');
-        item.className = `surface-subtle flex items-center justify-between gap-3 p-2.5 rounded-2xl group ${
+        item.className = `surface-subtle flex items-center justify-between gap-2 sm:gap-3 p-2 sm:p-2.5 rounded-2xl group ${
             isPriorityTarget ? 'ring-1 ring-amber-500/50 bg-amber-500/5' : ''
         }`;
 
@@ -1606,27 +1648,27 @@ function renderQueue() {
                 : `<button type="button" class="btn-priority-track px-2 py-1 rounded-lg text-[11px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 transition flex items-center gap-1" title="Yêu cầu ưu tiên phát bài này kế tiếp (cần ≥50% thành viên vote)">
                     <span>⚡</span><span class="hidden sm:inline">Ưu tiên</span>
                 </button>`)
-            : `<span class="px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold" title="Sẽ phát kế tiếp">#1 Kế tiếp</span>`;
+            : `<span class="px-1.5 sm:px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold flex-shrink-0" title="Sẽ phát kế tiếp">#1<span class="hidden sm:inline"> Kế tiếp</span></span>`;
 
         item.innerHTML = `
-            <div class="flex items-center gap-3 min-w-0 flex-1">
-                <span class="text-xs font-bold font-mono-num text-dim w-6 text-center flex-shrink-0">
+            <div class="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+                <span class="hidden sm:block text-xs font-bold font-mono-num text-dim w-6 text-center flex-shrink-0">
                     ${String(index + 1).padStart(2, '0')}
                 </span>
-                <div class="relative w-14 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-slate-900 shadow-sm">
+                <div class="relative w-12 h-8 sm:w-14 sm:h-9 rounded-lg overflow-hidden flex-shrink-0 bg-slate-900 shadow-sm">
                     <img src="${safeThumbUrl(track.id)}" alt="" class="w-full h-full object-cover" loading="lazy">
                     ${track.duration_str ? `<span class="absolute bottom-0.5 right-0.5 px-1 rounded bg-black/75 text-white text-[9px] font-mono-num">${escapeHtml(track.duration_str)}</span>` : ''}
                 </div>
                 <div class="min-w-0 flex-1">
                     <h5 class="text-xs md:text-[13px] font-semibold text-main truncate">${escapeHtml(track.title)}</h5>
-                    <div class="flex items-center gap-1.5 text-[11px] text-sub mt-0.5">
-                        <span class="truncate max-w-[140px]">${escapeHtml(track.author)}</span>
-                        <span class="text-dim">•</span>
-                        <span class="text-indigo-600 dark:text-indigo-400 font-medium truncate">${escapeHtml(track.added_by_name)}</span>
+                    <div class="flex items-center gap-1.5 text-[11px] text-sub mt-0.5 min-w-0">
+                        <span class="truncate">${escapeHtml(track.author)}</span>
+                        <span class="hidden sm:inline text-dim">•</span>
+                        <span class="hidden sm:inline text-indigo-600 dark:text-indigo-400 font-medium truncate">${escapeHtml(track.added_by_name)}</span>
                     </div>
                 </div>
             </div>
-            <div class="flex items-center gap-1 flex-shrink-0 opacity-85 group-hover:opacity-100 transition">
+            <div class="flex items-center gap-1 flex-shrink-0 opacity-100 sm:opacity-85 sm:group-hover:opacity-100 transition">
                 ${priorityBtnHtml}
                 ${canPromote ? `
                     <button type="button" class="btn-promote-track p-1.5 rounded-lg text-sub hover:text-indigo-500 hover:bg-indigo-500/10 transition" title="Host đưa ngay lên phát kế tiếp">
@@ -1704,6 +1746,7 @@ function renderHistory() {
         `;
 
         item.querySelector('.btn-replay-track').onclick = () => {
+            if (!canAddTrackInCurrentRoom()) return;
             window.roomSocket.addTrack(track);
         };
 
@@ -1773,8 +1816,32 @@ function initPlayerListeners() {
                 showToast('Hãy thêm bài hát trước khi phát!', 'info');
                 return;
             }
-            const newAction = (player.status === 'playing') ? 'pause' : 'play';
-            window.roomSocket.controlPlayback(newAction, player.getCurrentTime());
+            if (window.appState.isHost) {
+                // Host is Master: Play / Pause syncs the entire room!
+                if (player.autoplayBlocked) {
+                    player.unlockAudioAndSync();
+                    return;
+                }
+                const newAction = (player.status === 'playing') ? 'pause' : 'play';
+                window.roomSocket.controlPlayback(newAction, player.getCurrentTime());
+            } else {
+                // Regular members: local-only Play / Pause on their own device
+                player.toggleLocalPlayPause();
+            }
+        };
+    }
+
+    const syncLiveBtn = document.getElementById('btn-sync-live');
+    if (syncLiveBtn) {
+        syncLiveBtn.onclick = () => {
+            if (window.syncPlayer) window.syncPlayer.resyncToLive();
+        };
+    }
+
+    const autoplayBanner = document.getElementById('autoplay-unlock-banner');
+    if (autoplayBanner) {
+        autoplayBanner.onclick = () => {
+            if (window.syncPlayer) window.syncPlayer.unlockAudioAndSync();
         };
     }
 
@@ -1790,15 +1857,42 @@ function initPlayerListeners() {
     }
 
     if (progressBar) {
-        progressBar.addEventListener('change', (e) => {
+        progressBar.addEventListener('pointerdown', () => {
+            window.syncPlayer.isUserScrubbing = true;
+        });
+        const releaseScrub = () => {
+            window.syncPlayer.isUserScrubbing = false;
+        };
+        progressBar.addEventListener('pointerup', releaseScrub);
+        progressBar.addEventListener('pointercancel', releaseScrub);
+        progressBar.addEventListener('blur', releaseScrub);
+        progressBar.addEventListener('input', (e) => {
             const percent = parseFloat(e.target.value);
             const dur = window.syncPlayer.getDuration();
             if (dur > 0) {
                 const targetSec = (percent / 100) * dur;
-                window.syncPlayer.seekTo(targetSec);
-                window.roomSocket.controlPlayback('seek', targetSec);
+                const curEl = document.getElementById('player-time-current');
+                if (curEl) curEl.textContent = window.syncPlayer.formatTime(targetSec);
+                progressBar.style.background = `linear-gradient(to right, var(--accent-primary) 0%, var(--accent-pink) ${percent}%, var(--slider-track) ${percent}%)`;
             }
         });
+        const finishScrub = (e) => {
+            window.syncPlayer.isUserScrubbing = false;
+            const percent = parseFloat(e.target.value);
+            const dur = window.syncPlayer.getDuration();
+            if (dur > 0) {
+                const targetSec = (percent / 100) * dur;
+                if (window.appState.isHost) {
+                    // Host is Master: seek syncs the entire room!
+                    window.syncPlayer.seekLocal(targetSec, true);
+                    window.roomSocket.controlPlayback('seek', targetSec);
+                } else {
+                    // Regular members: local-only seek on their own device
+                    window.syncPlayer.seekLocal(targetSec, false);
+                }
+            }
+        };
+        progressBar.addEventListener('change', finishScrub);
     }
 
     if (volumeSlider) {
@@ -2024,21 +2118,17 @@ function initRoomControls() {
 // =============================================================================
 function setChatCollapsed(collapsed) {
     window.appState.isChatCollapsed = !!collapsed;
-    localStorage.setItem('floor2_chat_collapsed', collapsed ? 'true' : 'false');
+    if (window.innerWidth >= 1024) {
+        localStorage.setItem('floor2_chat_collapsed', collapsed ? 'true' : 'false');
+    }
 
     const sidebar = document.getElementById('chat-sidebar');
+    const backdrop = document.getElementById('mobile-chat-backdrop');
     const fab = document.getElementById('btn-expand-chat-fab');
-    const headerBtn = document.getElementById('btn-header-chat-toggle');
 
     if (sidebar) sidebar.classList.toggle('hidden', !!collapsed);
+    if (backdrop) backdrop.classList.toggle('hidden', !!collapsed);
     if (fab) fab.classList.toggle('hidden', !collapsed);
-
-    if (headerBtn) {
-        headerBtn.classList.toggle('border-indigo-500/50', !collapsed);
-        headerBtn.classList.toggle('bg-indigo-500/10', !collapsed);
-        const lbl = headerBtn.querySelector('.js-header-chat-label');
-        if (lbl) lbl.textContent = collapsed ? 'Mở Chat' : 'Chat';
-    }
 
     if (!collapsed && window.roomChat) {
         window.roomChat.resetUnread();
@@ -2048,10 +2138,8 @@ function setChatCollapsed(collapsed) {
 
 function initChatCollapse() {
     document.getElementById('btn-minimize-chat')?.addEventListener('click', () => setChatCollapsed(true));
+    document.getElementById('mobile-chat-backdrop')?.addEventListener('click', () => setChatCollapsed(true));
     document.getElementById('btn-expand-chat-fab')?.addEventListener('click', () => setChatCollapsed(false));
-    document.getElementById('btn-header-chat-toggle')?.addEventListener('click', () => {
-        setChatCollapsed(!window.appState.isChatCollapsed);
-    });
     setChatCollapsed(window.appState.isChatCollapsed);
 }
 
@@ -2457,6 +2545,8 @@ function initLightbox() {
 // =============================================================================
 const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v3';
 const SUGGESTIONS_CACHE_TTL_MS = 5 * 60 * 1000;
+const RELATED_STORAGE_KEY = 'floor2_related_cache_v1';
+const RELATED_STORAGE_MAX = 30;
 const RELATED_CACHE_TTL_MS = 15 * 60 * 1000;
 const MAX_SUGGESTION_CHIPS = 10;
 
@@ -2516,7 +2606,96 @@ const relatedSuggestionsState = {
     abortController: null,
     suppressClickUntil: 0,
     scrollControlsBound: false,
+    prefetchTimer: null,
+    prefetchingIds: new Set(),
 };
+
+function hydrateRelatedCacheFromStorage() {
+    try {
+        const raw = sessionStorage.getItem(RELATED_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        const now = Date.now();
+        Object.entries(parsed).forEach(([vid, entry]) => {
+            if (entry && Array.isArray(entry.items) && entry.items.length > 0 && (now - entry.ts) < RELATED_CACHE_TTL_MS) {
+                relatedSuggestionsState.cache.set(vid, { ts: entry.ts, items: entry.items });
+            }
+        });
+    } catch (_) {}
+}
+
+function persistRelatedCacheToStorage() {
+    try {
+        const now = Date.now();
+        const entries = Array.from(relatedSuggestionsState.cache.entries())
+            .filter(([, entry]) => entry && Array.isArray(entry.items) && (now - entry.ts) < RELATED_CACHE_TTL_MS)
+            .slice(-RELATED_STORAGE_MAX);
+        const obj = {};
+        entries.forEach(([vid, entry]) => {
+            obj[vid] = entry;
+        });
+        sessionStorage.setItem(RELATED_STORAGE_KEY, JSON.stringify(obj));
+    } catch (_) {}
+}
+
+function setRelatedCacheEntry(vid, items) {
+    if (!vid || !Array.isArray(items) || items.length === 0) return;
+    if (relatedSuggestionsState.cache.has(vid)) {
+        relatedSuggestionsState.cache.delete(vid);
+    } else if (relatedSuggestionsState.cache.size >= 60) {
+        const oldestKey = relatedSuggestionsState.cache.keys().next().value;
+        relatedSuggestionsState.cache.delete(oldestKey);
+    }
+    relatedSuggestionsState.cache.set(vid, { ts: Date.now(), items });
+    persistRelatedCacheToStorage();
+}
+
+function getFreshRelatedCache(vid) {
+    if (!vid) return null;
+    const cached = relatedSuggestionsState.cache.get(vid);
+    if (cached && (Date.now() - cached.ts) < RELATED_CACHE_TTL_MS && Array.isArray(cached.items) && cached.items.length > 0) {
+        return cached.items;
+    }
+    return null;
+}
+
+function prefetchRelatedForNextTrack(queue) {
+    if (relatedSuggestionsState.prefetchTimer) {
+        clearTimeout(relatedSuggestionsState.prefetchTimer);
+        relatedSuggestionsState.prefetchTimer = null;
+    }
+    if (!Array.isArray(queue) || queue.length === 0) return;
+    const nextVid = queue[0] && queue[0].id;
+    if (!nextVid) return;
+    if (getFreshRelatedCache(nextVid) || relatedSuggestionsState.prefetchingIds.has(nextVid)) return;
+
+    relatedSuggestionsState.prefetchTimer = setTimeout(async () => {
+        relatedSuggestionsState.prefetchTimer = null;
+        if (getFreshRelatedCache(nextVid) || relatedSuggestionsState.prefetchingIds.has(nextVid)) return;
+        relatedSuggestionsState.prefetchingIds.add(nextVid);
+        try {
+            const res = await fetch(`/api/youtube/related/${encodeURIComponent(nextVid)}?limit=14`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const items = Array.isArray(data.suggestions) ? data.suggestions : [];
+            if (items.length > 0) {
+                setRelatedCacheEntry(nextVid, items);
+                // If user already switched to this track while prefetch was in-flight, apply instantly!
+                if (relatedSuggestionsState.lastVideoId === nextVid && !relatedSuggestionsState.currentItems) {
+                    relatedSuggestionsState.currentItems = items;
+                    renderQuickSuggestionChips(items, true);
+                }
+            }
+        } catch (_) {
+            // Silent background prefetch
+        } finally {
+            relatedSuggestionsState.prefetchingIds.delete(nextVid);
+        }
+    }, 900);
+}
+
+hydrateRelatedCacheFromStorage();
 
 function updateSuggestionsNavButtons() {
     const container = document.getElementById('quick-suggestions-chips');
@@ -2596,6 +2775,10 @@ function resetRelatedSuggestions() {
         relatedSuggestionsState.abortController.abort();
         relatedSuggestionsState.abortController = null;
     }
+    if (relatedSuggestionsState.prefetchTimer) {
+        clearTimeout(relatedSuggestionsState.prefetchTimer);
+        relatedSuggestionsState.prefetchTimer = null;
+    }
     relatedSuggestionsState.lastVideoId = null;
     relatedSuggestionsState.currentItems = null;
     renderQuickSuggestionChips(window.appState.suggestions || [], false);
@@ -2606,8 +2789,12 @@ function renderQuickSuggestionSkeletons() {
     const titleEl = document.getElementById('quick-suggestions-title');
     const badgeEl = document.getElementById('quick-suggestions-badge');
     if (titleEl) titleEl.textContent = '✨ Đang tìm bài hát liên quan...';
-    if (badgeEl) badgeEl.classList.remove('hidden');
+    if (badgeEl) {
+        badgeEl.textContent = 'Đang tải...';
+        badgeEl.classList.remove('hidden');
+    }
     if (!container) return;
+    container.classList.remove('opacity-60');
     container.innerHTML = Array.from({ length: 5 }).map(() => `
         <div class="surface-subtle flex items-center gap-2.5 pl-1.5 pr-3 py-1.5 rounded-full flex-shrink-0 w-52">
             <div class="w-7 h-7 rounded-full skeleton-box flex-shrink-0"></div>
@@ -2624,12 +2811,14 @@ function renderQuickSuggestionChips(songs, isRelated = false) {
     const titleEl = document.getElementById('quick-suggestions-title');
     const badgeEl = document.getElementById('quick-suggestions-badge');
     if (titleEl) {
-        titleEl.textContent = isRelated ? '✨ Gợi ý liên quan đến bài đang phát' : 'Thêm nhanh 1 chạm';
+        titleEl.textContent = isRelated ? '✨ Gợi ý liên quan' : 'Thêm nhanh 1 chạm';
     }
     if (badgeEl) {
+        badgeEl.textContent = 'Liên quan';
         badgeEl.classList.toggle('hidden', !isRelated);
     }
     if (!container) return;
+    container.classList.remove('opacity-60');
 
     const roomData = window.appState.roomData;
     const playingId = roomData && roomData.current_track ? roomData.current_track.id : null;
@@ -2678,6 +2867,7 @@ function renderQuickSuggestionChips(songs, isRelated = false) {
                 e.stopPropagation();
                 return;
             }
+            if (!canAddTrackInCurrentRoom()) return;
             window.roomSocket.addTrack(song);
             const badge = chip.querySelector('.js-chip-plus');
             if (badge) {
@@ -2700,10 +2890,23 @@ function refreshVisibleSuggestionChips() {
     }
 }
 
-async function loadRelatedSuggestionsForTrack(track) {
+async function loadRelatedSuggestionsForTrack(track, preloadedItems = null) {
     const vid = track && track.id ? track.id : null;
     if (!vid) {
         resetRelatedSuggestions();
+        return;
+    }
+
+    // 0ms Instant Render if server already pushed pre-warmed related tracks over WebSocket
+    if (Array.isArray(preloadedItems) && preloadedItems.length > 0) {
+        if (relatedSuggestionsState.abortController) {
+            relatedSuggestionsState.abortController.abort();
+            relatedSuggestionsState.abortController = null;
+        }
+        relatedSuggestionsState.lastVideoId = vid;
+        setRelatedCacheEntry(vid, preloadedItems);
+        relatedSuggestionsState.currentItems = preloadedItems;
+        renderQuickSuggestionChips(preloadedItems, true);
         return;
     }
 
@@ -2714,12 +2917,15 @@ async function loadRelatedSuggestionsForTrack(track) {
 
     relatedSuggestionsState.lastVideoId = vid;
 
-    // Instant 0ms client-side cache hit
-    const cached = relatedSuggestionsState.cache.get(vid);
-    if (cached && (Date.now() - cached.ts) < RELATED_CACHE_TTL_MS) {
-        if (relatedSuggestionsState.abortController) relatedSuggestionsState.abortController.abort();
-        relatedSuggestionsState.currentItems = cached.items;
-        renderQuickSuggestionChips(cached.items, cached.items.length > 0);
+    // 0ms Instant Client-Side (Memory + sessionStorage) Cache Hit
+    const cachedItems = getFreshRelatedCache(vid);
+    if (cachedItems) {
+        if (relatedSuggestionsState.abortController) {
+            relatedSuggestionsState.abortController.abort();
+            relatedSuggestionsState.abortController = null;
+        }
+        relatedSuggestionsState.currentItems = cachedItems;
+        renderQuickSuggestionChips(cachedItems, true);
         return;
     }
 
@@ -2729,7 +2935,19 @@ async function loadRelatedSuggestionsForTrack(track) {
     const controller = new AbortController();
     relatedSuggestionsState.abortController = controller;
 
-    renderQuickSuggestionSkeletons();
+    // Stale-While-Revalidate: keep existing chips clickable & gently dimmed instead of wiping to blank skeletons!
+    const container = document.getElementById('quick-suggestions-chips');
+    const badgeEl = document.getElementById('quick-suggestions-badge');
+    const hasExistingChips = !!(container && container.querySelector('button'));
+    if (hasExistingChips) {
+        container.classList.add('opacity-60', 'transition-opacity');
+        if (badgeEl) {
+            badgeEl.textContent = 'Đang cập nhật...';
+            badgeEl.classList.remove('hidden');
+        }
+    } else {
+        renderQuickSuggestionSkeletons();
+    }
 
     try {
         const res = await fetch(`/api/youtube/related/${encodeURIComponent(vid)}?limit=14`, {
@@ -2741,11 +2959,7 @@ async function loadRelatedSuggestionsForTrack(track) {
 
         const items = Array.isArray(data.suggestions) ? data.suggestions : [];
         if (items.length > 0) {
-            if (relatedSuggestionsState.cache.size >= 60) {
-                const oldestKey = relatedSuggestionsState.cache.keys().next().value;
-                relatedSuggestionsState.cache.delete(oldestKey);
-            }
-            relatedSuggestionsState.cache.set(vid, { ts: Date.now(), items });
+            setRelatedCacheEntry(vid, items);
             relatedSuggestionsState.currentItems = items;
             renderQuickSuggestionChips(items, true);
         } else {
@@ -2756,6 +2970,11 @@ async function loadRelatedSuggestionsForTrack(track) {
         if (err.name === 'AbortError') return;
         relatedSuggestionsState.currentItems = null;
         renderQuickSuggestionChips(window.appState.suggestions || [], false);
+    } finally {
+        if (relatedSuggestionsState.abortController === controller) {
+            relatedSuggestionsState.abortController = null;
+            container?.classList.remove('opacity-60');
+        }
     }
 }
 
@@ -2795,6 +3014,8 @@ async function initQuickSuggestions() {
 // =============================================================================
 // SYNCED LYRICS ENGINE (KARAOKE-STYLE REALTIME HIGHLIGHT & SEEK ON CLICK)
 // =============================================================================
+const LYRICS_OFFSETS_STORAGE_KEY = 'floor2_lyrics_offsets_v1';
+
 const lyricsState = {
     cache: new Map(), // videoId -> { ts, data }
     lastVideoId: null,
@@ -2807,6 +3028,36 @@ const lyricsState = {
     userScrollPauseUntil: 0,
     controlsBound: false,
 };
+
+function getSavedLyricsOffset(vid) {
+    if (!vid) return 0;
+    try {
+        const raw = localStorage.getItem(LYRICS_OFFSETS_STORAGE_KEY);
+        if (!raw) return 0;
+        const map = JSON.parse(raw);
+        const v = map && typeof map[vid] === 'number' ? map[vid] : 0;
+        return Math.max(-90, Math.min(90, Math.round(v * 10) / 10));
+    } catch (_) {
+        return 0;
+    }
+}
+
+function saveLyricsOffset(vid, val) {
+    if (!vid) return;
+    try {
+        let map = {};
+        const raw = localStorage.getItem(LYRICS_OFFSETS_STORAGE_KEY);
+        if (raw) map = JSON.parse(raw) || {};
+        if (Math.abs(val) < 0.05) {
+            delete map[vid];
+        } else {
+            map[vid] = Math.round(val * 10) / 10;
+            const keys = Object.keys(map);
+            if (keys.length > 50) delete map[keys[0]];
+        }
+        localStorage.setItem(LYRICS_OFFSETS_STORAGE_KEY, JSON.stringify(map));
+    } catch (_) {}
+}
 
 function updateLyricsOffsetUI() {
     const valEl = document.getElementById('lyrics-offset-value');
@@ -2829,22 +3080,27 @@ function initLyricsControls() {
         viewport.addEventListener('touchstart', pauseAutoScroll, { passive: true });
     }
 
-    document.getElementById('btn-lyrics-offset-minus')?.addEventListener('click', () => {
-        lyricsState.offsetSec = Math.max(-15, Math.round((lyricsState.offsetSec - 0.5) * 10) / 10);
+    document.getElementById('btn-lyrics-offset-minus')?.addEventListener('click', (e) => {
+        const step = e.shiftKey ? 2.0 : 0.5;
+        lyricsState.offsetSec = Math.max(-90, Math.round((lyricsState.offsetSec - step) * 10) / 10);
+        saveLyricsOffset(lyricsState.lastVideoId, lyricsState.offsetSec);
         updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
     });
 
-    document.getElementById('btn-lyrics-offset-plus')?.addEventListener('click', () => {
-        lyricsState.offsetSec = Math.min(15, Math.round((lyricsState.offsetSec + 0.5) * 10) / 10);
+    document.getElementById('btn-lyrics-offset-plus')?.addEventListener('click', (e) => {
+        const step = e.shiftKey ? 2.0 : 0.5;
+        lyricsState.offsetSec = Math.min(90, Math.round((lyricsState.offsetSec + step) * 10) / 10);
+        saveLyricsOffset(lyricsState.lastVideoId, lyricsState.offsetSec);
         updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
     });
 
     document.getElementById('lyrics-offset-value')?.addEventListener('click', () => {
         lyricsState.offsetSec = 0;
+        saveLyricsOffset(lyricsState.lastVideoId, 0);
         updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
     });
 }
 
@@ -2890,8 +3146,19 @@ function renderLyricsData(data) {
 
     if (lyricsState.synced) {
         if (badge) {
+            const autoOff = Number(data && data.auto_offset) || 0;
+            const src = (data && data.source) || '';
             badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/35 text-[10px] font-bold text-emerald-200';
-            badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đồng bộ theo nhạc`;
+            if (Math.abs(autoOff) >= 0.35) {
+                badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đã khớp MV`;
+                badge.title = `Tự động căn khớp lời theo MV YouTube (${autoOff > 0 ? '+' : ''}${autoOff.toFixed(1)}s)`;
+            } else if (src === 'YouTube') {
+                badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Khớp YouTube`;
+                badge.title = 'Lời đồng bộ trực tiếp theo video YouTube đang phát';
+            } else {
+                badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đồng bộ theo nhạc`;
+                badge.title = 'Lời bài hát đồng bộ thời gian thực';
+            }
         }
         if (offsetCtrl) offsetCtrl.classList.remove('hidden');
 
@@ -2905,8 +3172,14 @@ function renderLyricsData(data) {
             p.title = `Bấm để tua đến ${window.syncPlayer ? window.syncPlayer.formatTime(line.time) : ''}`;
             p.onclick = () => {
                 const targetTime = Math.max(0, line.time - lyricsState.offsetSec);
-                window.syncPlayer.seekTo(targetTime);
-                window.roomSocket.controlPlayback('seek', targetTime);
+                if (window.appState.isHost) {
+                    // Host is Master: clicking a lyric line seeks for the whole room
+                    window.syncPlayer.seekLocal(targetTime, true);
+                    window.roomSocket.controlPlayback('seek', targetTime);
+                } else {
+                    // Regular members: local-only seek on their own device
+                    window.syncPlayer.seekLocal(targetTime, false);
+                }
                 lyricsState.userScrollPauseUntil = 0;
                 window.updateLyricsHighlight(targetTime, true);
             };
@@ -2914,7 +3187,7 @@ function renderLyricsData(data) {
         });
         container.scrollTop = 0;
         if (window.syncPlayer) {
-            window.updateLyricsHighlight(window.syncPlayer.getCurrentTime(), true);
+            window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
         }
         return;
     }
@@ -2965,7 +3238,7 @@ async function loadLyricsForTrack(track) {
     }
 
     lyricsState.lastVideoId = vid;
-    lyricsState.offsetSec = 0;
+    lyricsState.offsetSec = getSavedLyricsOffset(vid);
     updateLyricsOffsetUI();
 
     const cached = lyricsState.cache.get(vid);
@@ -2997,10 +3270,15 @@ async function loadLyricsForTrack(track) {
     }
 
     try {
+        const effectiveDuration = Math.round(
+            parseInt(track.duration, 10) ||
+            (window.syncPlayer ? window.syncPlayer.getDuration() : 0) ||
+            0
+        );
         const params = new URLSearchParams({
             title: track.title || '',
             author: track.author || '',
-            duration: String(parseInt(track.duration, 10) || 0),
+            duration: String(effectiveDuration),
             video_id: vid,
         });
         const res = await fetch(`/api/lyrics?${params.toString()}`, { signal: controller.signal });
@@ -3027,10 +3305,10 @@ function updateLyricsHighlight(currentTime, forceScroll = false) {
     const adjustedTime = Number(currentTime || 0) + lyricsState.offsetSec;
     const lines = lyricsState.lines;
 
-    // Find the last line whose timestamp <= adjustedTime
+    // Find the last line whose timestamp <= adjustedTime (tight 0.08s lead for snappy vocal match)
     let nextIdx = -1;
     for (let i = 0; i < lines.length; i++) {
-        if (lines[i].time <= adjustedTime + 0.15) {
+        if (lines[i].time <= adjustedTime + 0.08) {
             nextIdx = i;
         } else {
             break;
@@ -3059,11 +3337,16 @@ function updateLyricsHighlight(currentTime, forceScroll = false) {
     if (nextIdx >= 0 && children[nextIdx] && (forceScroll || nextIdx !== prevIdx)) {
         if (forceScroll || Date.now() >= lyricsState.userScrollPauseUntil) {
             const activeEl = children[nextIdx];
-            const targetScroll = activeEl.offsetTop - (container.clientHeight / 2) + (activeEl.clientHeight / 2);
-            container.scrollTo({
-                top: Math.max(0, targetScroll),
-                behavior: forceScroll ? 'auto' : 'smooth',
-            });
+            const cRect = container.getBoundingClientRect();
+            const eRect = activeEl.getBoundingClientRect();
+            if (cRect.height > 0) {
+                const relTop = (eRect.top - cRect.top) + container.scrollTop;
+                const targetScroll = relTop - (cRect.height / 2) + (eRect.height / 2);
+                container.scrollTo({
+                    top: Math.max(0, targetScroll),
+                    behavior: forceScroll ? 'auto' : 'smooth',
+                });
+            }
         }
     }
 }

@@ -858,7 +858,7 @@ def test_skip_vote_majority_and_anti_sybil():
 
 
 def test_related_videos_parser_and_endpoint():
-    from services.youtube import _extract_related_from_next_json, yt_related_cache
+    from services.youtube import _extract_related_from_next_json, get_cached_related_videos, yt_related_cache
 
     mock_next_json = {
         "contents": {
@@ -914,8 +914,17 @@ def test_related_videos_parser_and_endpoint():
     assert parsed[0]["duration"] == 326 and parsed[0]["duration_str"] == "5:26"
     assert parsed[1]["duration"] == 273
 
-    # Pre-seed cache to test HTTP endpoint completely offline
-    yt_related_cache.set("FN7ALfpGxiI:10", parsed)
+    # Pre-seed unified cache key (bare video_id) to test HTTP endpoint & O(1) embed completely offline
+    yt_related_cache.set("FN7ALfpGxiI", parsed)
+    cached_slice = get_cached_related_videos("FN7ALfpGxiI", limit=2)
+    assert cached_slice and [x["id"] for x in cached_slice] == ["abPmZCZZrFA", "Llw9Q6akRo4"]
+
+    # Verify Room.to_dict() embeds pre-warmed related_suggestions for 0ms init_state rendering
+    r_demo = Room("rel-test", "Related Embed Test")
+    r_demo.current_track = Track("FN7ALfpGxiI", "Nơi Này Có Anh", "Sơn Tùng M-TP", 278, "04:38", "u1", "U1")
+    rd = r_demo.to_dict()
+    assert rd["related_suggestions"] and [x["id"] for x in rd["related_suggestions"]] == ["abPmZCZZrFA", "Llw9Q6akRo4"]
+
     client = TestClient(app)
 
     bad = client.get("/api/youtube/related/invalid_id")
@@ -928,13 +937,19 @@ def test_related_videos_parser_and_endpoint():
     assert body["video_id"] == "FN7ALfpGxiI"
     assert [s["id"] for s in body["suggestions"]] == ["abPmZCZZrFA", "Llw9Q6akRo4"]
 
-    print("[OK] Related YouTube songs parser, cache & /api/youtube/related endpoint")
+    print("[OK] Related YouTube songs parser, unified cache, WS embed & /api/youtube/related endpoint")
 
 
 def test_lyrics_parser_cleaner_and_endpoint():
-    from services.lyrics import clean_youtube_title_for_lyrics, lyrics_cache, parse_lrc_lyrics
+    from services.lyrics import (
+        _score_lrclib_candidate,
+        clean_youtube_title_for_lyrics,
+        estimate_lrc_offset_from_captions,
+        lyrics_cache,
+        parse_lrc_lyrics,
+    )
 
-    # 1. Title cleaner handles V-Pop MV titles cleanly
+    # 1. Title cleaner handles pipe + dash V-Pop & Pop MV titles cleanly
     t1, a1 = clean_youtube_title_for_lyrics(
         "HÃY TRAO CHO ANH ft. Snoop Dogg | SƠN TÙNG M-TP | OFFICIAL MUSIC VIDEO",
         "Sơn Tùng M-TP Official",
@@ -949,7 +964,14 @@ def test_lyrics_parser_cleaner_and_endpoint():
     assert t2 == "Shape of You"
     assert a2 == "Ed Sheeran"
 
-    # 2. LRC parser supports single & multi timestamps and sorts cleanly
+    t3, a3 = clean_youtube_title_for_lyrics(
+        "Yêu Một Người Có Lẽ - Lou Hoàng - Miu Lê | Miu Lê Official",
+        "Miu Lê Official",
+    )
+    assert t3 == "Yêu Một Người Có Lẽ"
+    assert a3 == "Miu Lê"
+
+    # 2. LRC parser supports single, multi timestamps & [offset:ms] tags
     sample_lrc = """
     [ar:Sơn Tùng M-TP]
     [ti:Nơi Này Có Anh]
@@ -963,10 +985,33 @@ def test_lyrics_parser_cleaner_and_endpoint():
     assert parsed[0]["text"] == "Em là ai từ đâu bước đến nơi đây"
     assert parsed[3]["text"] == "Ngắm em thật lâu, con tim anh yếu mềm"
 
-    # 3. Cached /api/lyrics endpoint check (offline)
+    off_parsed = parse_lrc_lyrics("[offset:-2000]\n[00:10.00] Hello world")
+    assert off_parsed[0]["time"] == 12.0
+
+    # 3. Candidate scorer penalizes unwanted Remix when YT title is original
+    orig_score = _score_lrclib_candidate(
+        {"trackName": "Yêu Một Người Có Lẽ", "artistName": "Lou Hoàng, Miu Lê", "duration": 254, "syncedLyrics": "[00:01.00] Hi"},
+        264, "Yêu Một Người Có Lẽ", "Miu Lê", "Yêu Một Người Có Lẽ - Lou Hoàng - Miu Lê",
+    )
+    remix_score = _score_lrclib_candidate(
+        {"trackName": "Yêu Một Người Có Lẽ (Remix)", "artistName": "Lou Hoàng, Miu Lê", "duration": 254, "syncedLyrics": "[00:01.00] Hi"},
+        264, "Yêu Một Người Có Lẽ", "Miu Lê", "Yêu Một Người Có Lẽ - Lou Hoàng - Miu Lê",
+    )
+    assert orig_score > remix_score
+
+    # 4. Word-level RANSAC auto-offset aligns MV intro accurately (+8.6s shift)
+    yt_words = [
+        (29.86, "em"), (30.1, "la"), (30.3, "ai"), (30.5, "tu"), (30.7, "dau"),
+        (34.91, "em"), (35.1, "la"), (35.3, "ai"), (35.5, "tua"), (35.7, "nhu"),
+        (40.10, "ngam"), (40.3, "em"), (40.5, "that"), (40.7, "lau"),
+    ]
+    delta = estimate_lrc_offset_from_captions(parsed, yt_words, is_asr=False)
+    assert delta is not None and 8.4 <= delta <= 8.8, f"Unexpected auto-sync delta: {delta}"
+
+    # 5. Cached /api/lyrics endpoint check (offline)
     lyrics_cache.set(
         "FN7ALfpGxiI",
-        {"found": True, "synced": True, "lines": parsed, "plain_lines": [], "source": "LRCLIB"},
+        {"found": True, "synced": True, "lines": parsed, "plain_lines": [], "source": "LRCLIB + Auto-Sync", "auto_offset": 8.6},
     )
     client = TestClient(app)
     r = client.get("/api/lyrics", params={"title": "Nơi Này Có Anh", "author": "Sơn Tùng M-TP", "video_id": "FN7ALfpGxiI"})
@@ -975,7 +1020,7 @@ def test_lyrics_parser_cleaner_and_endpoint():
     body = r.json()
     assert body["found"] is True and body["synced"] is True and len(body["lines"]) == 4
 
-    print("[OK] Synced Lyrics LRC parser, title cleaner, cache & /api/lyrics endpoint")
+    print("[OK] Synced Lyrics LRC parser, title cleaner, auto-sync offset, cache & /api/lyrics endpoint")
 
 
 def test_diverse_room_history_suggestions():
@@ -1004,18 +1049,18 @@ def test_diverse_room_history_suggestions():
         Track("AmduqflT79M", "Yêu Một Người Có Lẽ", "Miu Lê", 265, "04:25", uid, "U1"),
     ]
 
-    # Pre-seed related caches offline (including 4 songs from same artist to verify max-2 cap)
-    yt_related_cache.set("FN7ALfpGxiI:8", [
+    # Pre-seed unified related caches offline (including 4 songs from same artist to verify max-2 cap)
+    yt_related_cache.set("FN7ALfpGxiI", [
         {"id": "abPmZCZZrFA", "title": "ST 1", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
         {"id": "Llw9Q6akRo4", "title": "ST 2", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
         {"id": "xypzmu5mMPY", "title": "ST 3", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
         {"id": "LCyo565N_5w", "title": "ST 4", "author": "Sơn Tùng M-TP", "thumbnail": "", "duration": 200, "duration_str": "3:20"},
     ])
-    yt_related_cache.set("JGwWNGJdvx8:8", [
+    yt_related_cache.set("JGwWNGJdvx8", [
         {"id": "Pkh8UtuejGw", "title": "Señorita", "author": "Shawn Mendes", "thumbnail": "", "duration": 206, "duration_str": "3:26"},
         {"id": "papuvlVeZg8", "title": "Rockabye", "author": "Clean Bandit", "thumbnail": "", "duration": 254, "duration_str": "4:14"},
     ])
-    yt_related_cache.set("AmduqflT79M:8", [
+    yt_related_cache.set("AmduqflT79M", [
         {"id": "_E-7A81Ac8U", "title": "Cause I Love You", "author": "Noo Phước Thịnh", "thumbnail": "", "duration": 374, "duration_str": "6:14"},
         {"id": "3AtDnEC4zak", "title": "We Don't Talk Anymore", "author": "Charlie Puth", "thumbnail": "", "duration": 230, "duration_str": "3:50"},
     ])
@@ -1032,6 +1077,110 @@ def test_diverse_room_history_suggestions():
     assert st_count <= 2, f"Artist diversity cap failed: {st_count}"
 
     print("[OK] Diverse room-history quick suggestions (interleaved & max 2/artist)")
+
+
+def test_sync_clock_no_double_count_and_local_only_playback():
+    import time as _t
+
+    client = TestClient(app)
+    rate_limiter._buckets.clear()
+    ddos_guard.reset()
+
+    tok, uid = _new_session(client)
+    cr = client.post("/api/rooms", headers={"X-Session-Token": tok}, json={"name": "Sync Clock Room", "dj_mode": False})
+    assert cr.status_code == 200
+    rid = cr.json()["room_id"]
+    room = rooms[rid]
+
+    # 1. Verify Room.to_dict() NEVER double-counts elapsed time on join
+    t1 = Track("FN7ALfpGxiI", "Playing Now", "Artist", 260, "04:20", uid, "Host")
+    t2 = Track("SlQR9iu09bQ", "Next Song", "Artist 2", 200, "03:20", uid, "Host")
+    room.current_track = t1
+    room.queue = [t2]
+    room.status = "playing"
+    room.current_time = 0.0
+    room.updated_at = _t.time() - 125.0  # started 125s ago
+
+    snap = room.to_dict()
+    assert 124.0 <= snap["current_time"] <= 127.0
+    assert abs(snap["updated_at"] - snap["server_time"]) < 0.05
+    assert abs(_t.time() - snap["updated_at"]) < 1.5, "updated_at must match snapshot instant to prevent double-counting!"
+
+    # 2. Verify Host IS Master (can pause/seek room) while non-Host Member is strictly blocked
+    #    even when dj_mode=False! Also verify premature track_ended is still blocked.
+    tok_mem, uid_mem = _new_session(client)
+    with client.websocket_connect(f"/ws/{rid}?token={tok}") as ws:
+        ws.send_json({"action": "join", "name": "Host"})
+        ws.receive_json()  # init_state
+        ws.receive_json()  # user_joined
+
+        # Host pauses room -> succeeds & broadcasts playback_sync
+        ws.send_json({"action": "control", "sub_action": "pause", "current_time": 50})
+        sync_pause = ws.receive_json()
+        assert sync_pause["type"] == "playback_sync"
+        assert sync_pause["status"] == "paused"
+        assert sync_pause["current_time"] == 50.0
+        assert "server_time" in sync_pause
+
+        # Host resumes & seeks room -> succeeds
+        ws.send_json({"action": "control", "sub_action": "play", "current_time": 120})
+        sync_play = ws.receive_json()
+        assert sync_play["type"] == "playback_sync"
+        assert sync_play["status"] == "playing"
+        assert sync_play["current_time"] == 120.0
+
+        # Premature track_ended blocked when server clock is at 120s of 260s
+        ws.send_json({"action": "track_ended", "track_id": t1.id, "track_uid": t1.uid})
+        assert room.current_track.uid == t1.uid
+
+        # Non-host member trying remote control (even with dj_mode=False!) is strictly rejected
+        with client.websocket_connect(f"/ws/{rid}?token={tok_mem}") as mws:
+            mws.send_json({"action": "join", "name": "Member"})
+            mws.receive_json()  # init_state
+            mws.receive_json()  # user_joined
+            ws.receive_json()   # host receives member user_joined
+
+            mws.send_json({"action": "control", "sub_action": "pause", "current_time": 10})
+            err_mem = mws.receive_json()
+            assert err_mem["type"] == "error"
+            assert room.status == "playing"
+
+            # Default DJ Mode is OFF -> regular member CAN add tracks!
+            assert room.dj_mode is False
+            mws.send_json({"action": "add_track", "track": {"id": "knW7-x7Y7RE", "title": "Member Song", "author": "A", "duration": 200}})
+            q_mem = mws.receive_json()
+            assert q_mem["type"] == "queue_updated"
+            ws.receive_json()  # host receives queue_updated
+            assert any(t.id == "knW7-x7Y7RE" for t in room.queue)
+
+            # Host toggles DJ Mode ON -> member CANNOT add tracks, Host STILL CAN!
+            ws.send_json({"action": "toggle_dj_mode"})
+            dj_on_h = ws.receive_json()
+            dj_on_m = mws.receive_json()
+            assert dj_on_h["type"] == "dj_mode_changed" and dj_on_h["dj_mode"] is True
+            assert dj_on_m["dj_mode"] is True
+
+            mws.send_json({"action": "add_track", "track": {"id": "JGwWNGJdvx8", "title": "Blocked Song", "author": "B", "duration": 200}})
+            err_dj = mws.receive_json()
+            assert err_dj["type"] == "error"
+            assert not any(t.id == "JGwWNGJdvx8" for t in room.queue)
+
+            ws.send_json({"action": "add_track", "track": {"id": "JGwWNGJdvx8", "title": "Host Song", "author": "B", "duration": 200}})
+            q_host = ws.receive_json()
+            mws.receive_json()
+            assert q_host["type"] == "queue_updated"
+            assert any(t.id == "JGwWNGJdvx8" for t in room.queue)
+
+    # 3. Verify catch_up_if_expired() advances past a finished zombie track cleanly
+    room.status = "playing"
+    room.current_time = 0.0
+    room.updated_at = _t.time() - 300.0  # 300s > 260s duration -> expired by 40s
+    changed = room.catch_up_if_expired()
+    assert changed is True
+    assert room.current_track is not None and room.current_track.uid == t2.uid
+    assert 38.0 <= room.get_synced_time() <= 43.0
+
+    print("[OK] Room sync clock (no double-count), Host Master control & Member local-only isolation")
 
 
 if __name__ == "__main__":
@@ -1052,6 +1201,7 @@ if __name__ == "__main__":
         test_related_videos_parser_and_endpoint()
         test_lyrics_parser_cleaner_and_endpoint()
         test_diverse_room_history_suggestions()
+        test_sync_clock_no_double_count_and_local_only_playback()
         print("ALL TESTS PASSED!")
     finally:
         db.close()
