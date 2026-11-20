@@ -1987,6 +1987,69 @@ def test_groq_rate_guard_and_agent_model_failover():
     print("[OK] Groq rate guard: per-(key, model) budget, exact retry-after cooldown, agent 120b -> 20b failover")
 
 
+def test_lobby_top_rooms_search_and_owner_delete():
+    """Lobby: top 5 busiest public rooms, accent-insensitive search, creator-only delete (kicks everyone)."""
+    import main as M
+
+    client = TestClient(app)
+    rate_limiter._buckets.clear()
+    ddos_guard.reset()
+    owner_key = "b2" * 24
+    r_owner = client.post("/api/session", headers={"X-Device-Key": owner_key}).json()
+    tok_owner = r_owner["token"]
+    tok_other, _ = _new_session(client)
+
+    # 7 public rooms with different member counts
+    created = []
+    for i in range(7):
+        if i == 0:
+            rid = client.post("/api/rooms", headers={"X-Session-Token": tok_owner},
+                              json={"name": "Quán Cà Phê Chill"}).json()["room_id"]
+        else:  # extra rooms created directly (the create endpoint is rate-limited per IP)
+            rid = f"lobbytest{i}"
+            rooms[rid] = M.Room(rid, f"Lobby Test {i}", host_id="someone")
+        created.append(rid)
+        room = rooms[rid]
+        for k in range(i):
+            room.users[f"u{i}_{k}"] = User(f"u{i}_{k}", f"N{k}", "🎧", "#111111")
+
+    # Default list: only the top 5 by members, busiest first; the owner also sees their own room
+    lst = client.get("/api/rooms", headers={"X-Session-Token": tok_owner}).json()
+    ids = [r["id"] for r in lst["rooms"]]
+    assert len(ids) == 5 and lst["total"] >= 7
+    counts = [r["user_count"] for r in lst["rooms"]]
+    assert counts == sorted(counts, reverse=True)
+    assert any(r["id"] == created[0] and r["is_mine"] for r in lst["rooms"] + lst["my_rooms"])
+    anon = client.get("/api/rooms").json()
+    assert all(not r["is_mine"] for r in anon["rooms"]) and anon["my_rooms"] == []
+
+    # Search ignores accents / case and reaches rooms outside the top 5
+    found = client.get("/api/rooms", params={"q": "quan ca phe"}).json()
+    assert created[0] in [r["id"] for r in found["rooms"]]
+    assert all("quan ca phe" in M._normalize_vn_music_text(r["name"]) for r in found["rooms"])
+    assert client.get("/api/rooms", params={"q": "lobby test 6"}).json()["rooms"][0]["id"] == "lobbytest6"
+
+    # Only the creator can delete; others get 403
+    assert client.delete(f"/api/rooms/{created[0]}", headers={"X-Session-Token": tok_other}).status_code == 403
+    # After a server restart the creator is recognised again via the device-derived profile (new session)
+    tok_owner2 = client.post("/api/session", headers={"X-Device-Key": owner_key}).json()["token"]
+    with client.websocket_connect(f"/ws/{created[0]}?token={tok_other}") as ws:
+        ws.send_json({"action": "join", "name": "Khách"})
+        init = ws.receive_json()
+        assert init["type"] == "init_state" and init["is_owner"] is False
+        ws.receive_json()
+        r_del = client.delete(f"/api/rooms/{created[0]}", headers={"X-Session-Token": tok_owner2})
+        assert r_del.status_code == 200
+        ev = ws.receive_json()
+        assert ev["type"] == "room_deleted"
+    assert created[0] not in rooms
+    assert client.get(f"/api/rooms/{created[0]}", headers={"X-Session-Token": tok_owner2}).status_code == 404
+
+    for rid in created[1:]:
+        rooms.pop(rid, None)
+    print("[OK] Lobby: top 5 busiest rooms, accent-insensitive search, creator-only room delete")
+
+
 if __name__ == "__main__":
     try:
         rate_limiter._buckets.clear()
@@ -2014,6 +2077,7 @@ if __name__ == "__main__":
         test_tab_switch_grace_period_and_explicit_leave()
         test_agent_routing_and_quota_cooldown()
         test_groq_rate_guard_and_agent_model_failover()
+        test_lobby_top_rooms_search_and_owner_delete()
         print("ALL TESTS PASSED!")
     finally:
         db.close()

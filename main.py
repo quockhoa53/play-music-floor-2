@@ -471,6 +471,10 @@ class Room:
         self.caption_tasks: Dict[str, asyncio.Task] = {}
         # Unexpected disconnects (tab in background, flaky network) keep the member for a grace period
         self.pending_leaves: Dict[str, asyncio.Task] = {}
+        # Creator (can delete the room). profile_id survives server restarts (device-derived), user_id does not
+        self.owner_user_id: str = host_id
+        self.owner_profile_id: str = ""
+        self.owner_loaded: bool = False
 
         # Ended reports for unknown-duration tracks (tied to current_track.uid)
         self.ended_reports: Set[str] = set()
@@ -2447,15 +2451,129 @@ async def create_or_resume_session(
     return {"token": sess.token, "user_id": sess.user_id}
 
 
+async def _persist_room_owner(room: "Room") -> None:
+    try:
+        doc = await memory_store.ensure_room(room.id)
+        doc["owner_profile_id"] = room.owner_profile_id
+        doc["owner_user_id"] = room.owner_user_id
+        memory_store._mark_dirty("room", room.id)
+    except Exception as exc:
+        print(f"[rooms] persist owner failed: {exc}")
+
+
+async def _ensure_room_owner(room: "Room") -> None:
+    """Rooms restored from the DB after a restart get their creator back from the room memory doc."""
+    if room.owner_loaded:
+        return
+    try:
+        doc = await memory_store.ensure_room(room.id)
+        room.owner_profile_id = room.owner_profile_id or str(doc.get("owner_profile_id") or "")
+        room.owner_user_id = room.owner_user_id or str(doc.get("owner_user_id") or "")
+    except Exception:
+        pass
+    room.owner_loaded = True
+
+
+def is_room_owner(room: "Room", sess: Optional[Session]) -> bool:
+    if not sess:
+        return False
+    if room.owner_profile_id and sess.profile_id and sess.profile_id == room.owner_profile_id:
+        return True
+    return bool(room.owner_user_id and sess.user_id == room.owner_user_id)
+
+
+def _room_sort_key(r: "Room"):
+    # Most members first, then rooms actually playing, then most recently active
+    return (-len(r.users), 0 if r.status == "playing" else 1, -float(r.updated_at or 0))
+
+
+LOBBY_TOP_ROOMS = 5
+
+
 @app.get("/api/rooms")
-async def list_rooms():
-    """List ONLY public rooms with short TTL caching (instant invalidation on mutations)."""
-    cached = public_rooms_cache.get("list")
-    if cached is not None:
-        return {"rooms": cached}
-    public_list = [r.to_public_preview() for r in rooms.values() if not r.is_private]
-    public_rooms_cache.set("list", public_list)
-    return {"rooms": public_list}
+async def list_rooms(
+    request: Request,
+    q: str = Query(default="", max_length=60),
+    limit: int = Query(default=LOBBY_TOP_ROOMS, ge=1, le=20),
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """Lobby list: top public rooms by members (default 5), name / now-playing search, and the caller's own rooms."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"list_rooms:{ip}", limit=60, window_sec=60)
+    sess = resolve_session(x_session_token)
+    query = _normalize_vn_music_text(q)
+
+    public = [r for r in rooms.values() if not r.is_private]
+    if sess:
+        await asyncio.gather(*(_ensure_room_owner(r) for r in rooms.values() if not r.owner_loaded))
+    mine = [r for r in rooms.values() if is_room_owner(r, sess)] if sess else []
+
+    if query:
+        def _match(r: "Room") -> bool:
+            hay = _normalize_vn_music_text(f"{r.name} {r.current_track.title if r.current_track else ''}")
+            return all(tok in hay for tok in query.split())
+
+        # Search covers public rooms and the caller's own (incl. private) rooms
+        pool = {r.id: r for r in public + mine}
+        matched = sorted((r for r in pool.values() if _match(r)), key=_room_sort_key)
+        listed = matched[:20]
+        total = len(matched)
+    else:
+        ranked = sorted(public, key=_room_sort_key)
+        listed = ranked[:limit]
+        total = len(ranked)
+
+    listed_ids = {r.id for r in listed}
+
+    def _view(r: "Room") -> Dict:
+        v = r.to_public_preview()
+        v["is_mine"] = is_room_owner(r, sess)
+        return v
+
+    my_rooms = [] if query else [_view(r) for r in sorted(mine, key=_room_sort_key) if r.id not in listed_ids][:5]
+    return JSONResponse(
+        {"rooms": [_view(r) for r in listed], "my_rooms": my_rooms, "total": total, "query": q},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/api/rooms/{room_id}")
+async def delete_room(
+    room_id: str,
+    request: Request,
+    x_session_token: Optional[str] = Header(default=None),
+):
+    """The room's creator removes it: everyone is notified & disconnected, data is deleted."""
+    ip = get_client_ip(request.headers, request.client)
+    require_rate_limit(f"delete_room:{ip}", limit=10, window_sec=60)
+    sess = require_session(x_session_token)
+    clean_id = room_id.strip().lower()
+    room = rooms.get(clean_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Không tìm thấy phòng")
+    await _ensure_room_owner(room)
+    if not is_room_owner(room, sess):
+        raise HTTPException(status_code=403, detail="Chỉ người tạo phòng mới được xóa phòng")
+
+    async with rooms_lock:
+        rooms.pop(clean_id, None)
+    for task in list(room.pending_leaves.values()):
+        task.cancel()
+    room.pending_leaves.clear()
+    await room.broadcast({"type": "room_deleted", "room_id": clean_id, "message": "Người tạo phòng đã xóa phòng này"})
+    for ws in list(room.user_sockets.values()):
+        try:
+            await ws.close(code=4004, reason="Phòng đã bị xóa")
+        except Exception:
+            pass
+    room.user_sockets.clear()
+    room.users.clear()
+    forget_conversation_digest(clean_id)
+    memory_store._rooms.pop(clean_id, None)
+    invalidate_rooms_cache()
+    db.schedule_delete_room(clean_id)
+    telemetry.event("room_deleted", room=clean_id)
+    return {"success": True, "room_id": clean_id}
 
 
 @app.post("/api/rooms")
@@ -2507,18 +2625,21 @@ async def create_room(
             is_private=is_private,
             passcode_hash=passcode_hash,
         )
+        room.owner_profile_id = sess.profile_id or ""
+        room.owner_loaded = True
         rooms[room_id] = room
         invalidate_rooms_cache()
         db.schedule_save_room(room.to_db_record())
+    asyncio.create_task(_persist_room_owner(room))
 
-        resp = {
-            "success": True,
-            "room_id": room_id,
-            "is_private": room.is_private,
-        }
-        if room.is_private:
-            resp["invite_token"] = room.invite_token
-        return resp
+    resp = {
+        "success": True,
+        "room_id": room_id,
+        "is_private": room.is_private,
+    }
+    if room.is_private:
+        resp["invite_token"] = room.invite_token
+    return resp
 
 
 @app.post("/api/rooms/{room_id}/access")
@@ -3289,6 +3410,7 @@ async def websocket_room_endpoint(
         await websocket.close(code=4029, reason=ws_slot_reason)
         return
 
+    await _ensure_room_owner(room)
     await websocket.accept()
     joined = False
     explicit_leave = False
@@ -3384,6 +3506,7 @@ async def websocket_room_endpoint(
                         "messages": room.messages[-50:],
                         "your_user_id": user_id,
                         "is_host": is_host,
+                        "is_owner": is_room_owner(room, sess),
                     }
                     join_msg = None
                     if not resumed:

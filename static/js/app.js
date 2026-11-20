@@ -624,71 +624,177 @@ function initProfileUI() {
 // =============================================================================
 // LOBBY & PUBLIC ROOMS
 // =============================================================================
-async function loadPublicRooms() {
+// Lobby shows the 5 busiest public rooms (server-ranked) + the caller's own rooms; search covers all rooms
+window.lobbyRoomQuery = '';
+let lobbyRoomsAbort = null;
+
+function renderLobbyRoomItem(r) {
+    const item = document.createElement('div');
+    item.className = 'surface-subtle p-3 sm:p-3.5 rounded-2xl flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer group';
+
+    const playingTitle = r.current_track ? r.current_track.title : 'Đang chờ thêm nhạc...';
+    const isPlaying = r.status === 'playing';
+    const thumbHtml = r.current_track
+        ? `<img src="${safeThumbUrl(r.current_track.id)}" alt="" class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
+        : `<div class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-pink-500/20 border border-indigo-500/20 flex items-center justify-center text-indigo-500 dark:text-indigo-300 flex-shrink-0">
+             <svg class="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+           </div>`;
+
+    const liveBadge = isPlaying
+        ? `<span class="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-wide flex-shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>Live</span>`
+        : `<span class="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full bg-slate-500/10 text-dim text-[10px] font-semibold flex-shrink-0">Sẵn sàng</span>`;
+    const mineBadge = r.is_mine
+        ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 text-[10px] font-bold flex-shrink-0">Của bạn</span>`
+        : '';
+    const lockIcon = r.is_private ? '<span class="text-[11px] flex-shrink-0" title="Phòng riêng tư">🔒</span>' : '';
+    const deleteBtn = r.is_mine
+        ? `<button type="button" class="js-delete-room w-8 h-8 rounded-xl surface-subtle flex items-center justify-center text-sub hover:text-rose-500 hover:border-rose-500/40 flex-shrink-0" title="Xóa phòng">
+             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+           </button>`
+        : '';
+
+    item.innerHTML = `
+        <div class="flex items-center gap-2.5 sm:gap-3.5 min-w-0 flex-1">
+            ${thumbHtml}
+            <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 min-w-0">
+                    ${isPlaying ? '<span class="sm:hidden w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0"></span>' : ''}
+                    ${lockIcon}
+                    <h4 class="font-bold text-main text-xs sm:text-sm truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(r.name)}</h4>
+                    ${mineBadge}
+                    ${liveBadge}
+                </div>
+                <p class="text-[11px] sm:text-xs text-sub truncate mt-0.5">${escapeHtml(playingTitle)}</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+            <span class="inline-flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-sub px-2 sm:px-2.5 py-1 rounded-full surface-subtle">
+                <svg class="w-3 h-3 sm:w-3.5 sm:h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                ${parseInt(r.user_count, 10) || 0}
+            </span>
+            ${deleteBtn}
+            <span class="px-3 sm:px-3.5 py-1.5 rounded-xl btn-gradient text-xs font-semibold">Vào</span>
+        </div>
+    `;
+    item.onclick = () => joinRoom(r.id);
+    item.querySelector('.js-delete-room')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteRoomById(r.id, r.name);
+    });
+    return item;
+}
+
+async function loadPublicRooms(query = window.lobbyRoomQuery || '') {
     const listContainer = document.getElementById('active-rooms-list');
+    const footer = document.getElementById('active-rooms-footer');
     if (!listContainer) return;
+    window.lobbyRoomQuery = (query || '').trim();
+
+    if (lobbyRoomsAbort) lobbyRoomsAbort.abort();
+    const controller = new AbortController();
+    lobbyRoomsAbort = controller;
 
     try {
-        const res = await fetch('/api/rooms');
+        const params = new URLSearchParams();
+        if (window.lobbyRoomQuery) params.set('q', window.lobbyRoomQuery);
+        const res = await fetch(`/api/rooms${params.toString() ? `?${params}` : ''}`, {
+            headers: getAuthHeaders(),
+            signal: controller.signal,
+        });
         const data = await res.json();
-        const rooms = data.rooms || [];
-
-        if (rooms.length === 0) {
-            listContainer.innerHTML = `
-                <div class="text-center py-8 text-dim text-sm">
-                    Chưa có phòng nào đang mở. Hãy tạo phòng đầu tiên nhé!
-                </div>
-            `;
-            return;
-        }
+        if (controller.signal.aborted) return;
+        const roomsList = data.rooms || [];
+        const myRooms = data.my_rooms || [];
+        const total = parseInt(data.total, 10) || 0;
 
         listContainer.innerHTML = '';
-        rooms.forEach(r => {
-            const item = document.createElement('div');
-            item.className = 'surface-subtle p-3 sm:p-3.5 rounded-2xl flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer group';
-
-            const playingTitle = r.current_track ? r.current_track.title : 'Đang chờ thêm nhạc...';
-            const isPlaying = r.status === 'playing';
-            const thumbHtml = r.current_track
-                ? `<img src="${safeThumbUrl(r.current_track.id)}" alt="" class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl object-cover shadow-sm flex-shrink-0">`
-                : `<div class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-pink-500/20 border border-indigo-500/20 flex items-center justify-center text-indigo-500 dark:text-indigo-300 flex-shrink-0">
-                     <svg class="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
-                   </div>`;
-
-            const liveBadge = isPlaying
-                ? `<span class="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-wide flex-shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>Live</span>`
-                : `<span class="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full bg-slate-500/10 text-dim text-[10px] font-semibold flex-shrink-0">Sẵn sàng</span>`;
-
-            item.innerHTML = `
-                <div class="flex items-center gap-2.5 sm:gap-3.5 min-w-0 flex-1">
-                    ${thumbHtml}
-                    <div class="min-w-0 flex-1">
-                        <div class="flex items-center gap-1.5 min-w-0">
-                            ${isPlaying ? '<span class="sm:hidden w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0"></span>' : ''}
-                            <h4 class="font-bold text-main text-xs sm:text-sm truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition">${escapeHtml(r.name)}</h4>
-                            ${liveBadge}
-                        </div>
-                        <p class="text-[11px] sm:text-xs text-sub truncate mt-0.5">${escapeHtml(playingTitle)}</p>
-                    </div>
-                </div>
-                <div class="flex items-center gap-1.5 sm:gap-2.5 flex-shrink-0">
-                    <span class="inline-flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-sub px-2 sm:px-2.5 py-1 rounded-full surface-subtle">
-                        <svg class="w-3 h-3 sm:w-3.5 sm:h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                        ${parseInt(r.user_count, 10) || 0}
-                    </span>
-                    <span class="px-3 sm:px-3.5 py-1.5 rounded-xl btn-gradient text-xs font-semibold">
-                        Vào
-                    </span>
+        if (roomsList.length === 0 && myRooms.length === 0) {
+            listContainer.innerHTML = `
+                <div class="text-center py-8 text-dim text-sm">
+                    ${window.lobbyRoomQuery
+                        ? `Không tìm thấy phòng nào khớp “${escapeHtml(window.lobbyRoomQuery)}”`
+                        : 'Chưa có phòng nào đang mở. Hãy tạo phòng đầu tiên nhé!'}
                 </div>
             `;
+        }
+        roomsList.forEach(r => listContainer.appendChild(renderLobbyRoomItem(r)));
 
-            item.onclick = () => joinRoom(r.id);
-            listContainer.appendChild(item);
-        });
+        if (myRooms.length > 0) {
+            const label = document.createElement('div');
+            label.className = 'pt-2 pb-0.5 px-1 text-[11px] font-bold uppercase tracking-wide text-dim';
+            label.textContent = 'Phòng của bạn';
+            listContainer.appendChild(label);
+            myRooms.forEach(r => listContainer.appendChild(renderLobbyRoomItem(r)));
+        }
+
+        if (footer) {
+            let text = '';
+            if (window.lobbyRoomQuery) {
+                text = total > roomsList.length ? `Hiển thị ${roomsList.length}/${total} kết quả` : `${total} kết quả`;
+            } else if (total > roomsList.length) {
+                text = `Top ${roomsList.length} phòng đông nhất · còn ${total - roomsList.length} phòng khác, gõ tên để tìm`;
+            }
+            footer.textContent = text;
+            footer.classList.toggle('hidden', !text);
+        }
     } catch (e) {
+        if (e.name === 'AbortError') return;
         console.error('Error fetching rooms:', e);
+    } finally {
+        if (lobbyRoomsAbort === controller) lobbyRoomsAbort = null;
     }
 }
+
+function initLobbyRoomSearch() {
+    const input = document.getElementById('lobby-room-search');
+    if (!input || input.dataset.bound) return;
+    input.dataset.bound = '1';
+    let timer = null;
+    input.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => loadPublicRooms(input.value), 250);
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            input.value = '';
+            loadPublicRooms('');
+        }
+    });
+}
+
+/** Creator deletes a room: everyone inside is notified and sent back to the lobby. */
+async function deleteRoomById(roomId, roomName = '') {
+    const confirmed = await showConfirmDialog({
+        title: 'Xóa phòng nhạc?',
+        message: `Phòng “${roomName || roomId}” cùng hàng đợi, lịch sử và tin nhắn sẽ bị xóa vĩnh viễn. Mọi người đang trong phòng sẽ được đưa về sảnh.`,
+        confirmText: 'Xóa phòng',
+        cancelText: 'Hủy',
+        variant: 'danger',
+    });
+    if (!confirmed) return;
+    try {
+        await ensureSession();
+        let res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE', headers: getAuthHeaders() });
+        if (res.status === 401) {
+            await ensureSession(true, true).catch(() => {});
+            res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE', headers: getAuthHeaders() });
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không xóa được phòng', 'error');
+            return;
+        }
+        showToast('Đã xóa phòng', 'success');
+        if (window.appState.roomId === roomId) {
+            leaveRoom();
+        } else {
+            loadPublicRooms();
+        }
+    } catch (e) {
+        showToast('Không xóa được phòng, thử lại sau nhé', 'error');
+    }
+}
+window.deleteRoomById = deleteRoomById;
 
 // =============================================================================
 // ROOM JOIN / CREATE FLOW (AUTHENTICATED + PRIVATE ROOM ACCESS)
@@ -808,6 +914,8 @@ function leaveRoom() {
     stopMcRadioSpeech();
     document.getElementById('room-vibe-card')?.classList.add('hidden');
     document.getElementById('ai-dj-modal')?.classList.add('hidden');
+    document.getElementById('btn-delete-room')?.classList.add('hidden');
+    window.appState.isRoomOwner = false;
     window.appState.roomId = null;
     window.appState.inviteToken = null;
     window.appState.roomData = null;
@@ -1242,6 +1350,8 @@ function initSocketEvents() {
     socket.on('init_state', (data) => {
         window.appState.roomData = data.room;
         window.appState.isHost = data.is_host;
+        window.appState.isRoomOwner = !!data.is_owner;
+        document.getElementById('btn-delete-room')?.classList.toggle('hidden', !data.is_owner);
         if (data.your_user_id) window.appState.userId = data.your_user_id;
         if (data.room && data.room.invite_token) {
             window.appState.inviteToken = data.room.invite_token;
@@ -1449,6 +1559,11 @@ function initSocketEvents() {
         leaveRoom();
         showToast(data?.reason || 'Không có quyền truy cập phòng riêng tư', 'error');
         if (failedRoom) openPasscodeModal(failedRoom, true);
+    });
+
+    socket.on('room_deleted', (data) => {
+        leaveRoom();
+        showToast((data && data.message) || 'Phòng đã bị xóa', 'warning');
     });
 
     socket.on('room_not_found', (data) => {
@@ -2065,6 +2180,12 @@ function copyInviteLink() {
 function initRoomControls() {
     document.getElementById('btn-share-room')?.addEventListener('click', copyInviteLink);
     document.getElementById('room-id-badge')?.addEventListener('click', copyInviteLink);
+
+    document.getElementById('btn-delete-room')?.addEventListener('click', () => {
+        const rd = window.appState.roomData;
+        if (rd) deleteRoomById(rd.id, rd.name);
+    });
+    initLobbyRoomSearch();
 
     document.getElementById('btn-leave-room')?.addEventListener('click', async () => {
         const confirmed = await showConfirmDialog({

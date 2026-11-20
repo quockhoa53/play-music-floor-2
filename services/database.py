@@ -482,6 +482,34 @@ class DatabaseManager:
         except RuntimeError:
             self.save_lyrics_offset_sync(video_id, offset_sec, updated_by)
 
+    def delete_room_sync(self, room_id: str):
+        """Remove a room and everything that belongs to it (owner deleted the room)."""
+        if not self.connected:
+            return
+        tables = ("room_messages", "room_history", "room_queue")
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        for t in tables:
+                            cur.execute(f"DELETE FROM {t} WHERE room_id = %s", (room_id,))
+                        cur.execute("DELETE FROM rooms WHERE id = %s", (room_id,))
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                for t in tables:
+                    self._rest_client.delete(f"/{t}", params={"room_id": f"eq.{room_id}"})
+                self._rest_client.delete("/rooms", params={"id": f"eq.{room_id}"})
+        except Exception as e:
+            print(f"[DB] delete_room error: {e}")
+        self.delete_json_doc_sync("room_memories", "room_id", room_id)
+
+    def schedule_delete_room(self, room_id: str):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.delete_room_sync, room_id)
+        except RuntimeError:
+            self.delete_room_sync(room_id)
+
     # ------------------------------------------------------------------
     # GENERIC JSON DOCUMENTS (member_profiles / room_memories for AI memory)
     # Optional tables; when missing we silently stay in-memory.
