@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
@@ -202,6 +203,9 @@ async def groq_chat(
 
     models_to_try = [model] if model else [PRIMARY_MODEL, FALLBACK_MODEL]
     client = _get_groq_client()
+    # json_mode: Groq rejects output that is not valid JSON (400 json_validate_failed) but returns the text the
+    # model wrote. Keep it so callers can still salvage a usable reply if every attempt fails.
+    salvaged_text: Optional[str] = None
 
     for m_name in models_to_try:
         for key_idx, api_key in order:
@@ -242,18 +246,31 @@ async def groq_chat(
                 elif resp.status_code in (401, 403):
                     key_rotator.mark_rate_limited(key_idx, 120.0)
                     continue
+                elif resp.status_code == 400 and json_mode:
+                    try:
+                        failed = resp.json().get("error", {}).get("failed_generation")
+                    except Exception:
+                        failed = None
+                    if failed and not salvaged_text:
+                        salvaged_text = _clean_model_text(str(failed))
+                    continue
                 else:
                     # Try next key/model on 5xx or 404
                     continue
             except Exception as exc:
                 print(f"[ai groq err key#{key_idx} model={m_name}] {exc}")
                 continue
-    return None
+    return salvaged_text or None
 
 
 def build_room_ai_context(
     room: Any,
     current_lyrics_excerpt: str = "",
+    *,
+    include_chat: bool = True,
+    chat_char_budget: int = 1200,
+    exclude_last_text: str = "",
+    conversation_digest: str = "",
 ) -> str:
     """Build rich live room context: room info, playing song + lyrics, queue, member tastes & chat."""
     lines: List[str] = []
@@ -316,19 +333,284 @@ def build_room_ai_context(
             m_lines.append(f"  - {u.name} ({role}){taste_str}")
         lines.append("Thành viên đang trong phòng & gu âm nhạc:\n" + "\n".join(m_lines))
 
-    # Recent chat history (text only, last 12 non-system messages)
-    recent_chat = [
-        m for m in room.messages[-20:]
-        if m.get("type") == "chat" and (m.get("text") or "").strip()
-    ][-12:]
-    if recent_chat:
-        c_lines = [
-            f"  {m.get('user_name', 'Khách')}: {(m.get('text') or '')[:160]}"
-            for m in recent_chat
-        ]
-        lines.append("Cuộc trò chuyện gần đây:\n" + "\n".join(c_lines))
+    # Whole-session digest (wide but compressed) + verbatim latest messages (narrow but exact)
+    if include_chat and conversation_digest:
+        lines.append("Tóm tắt diễn biến cuộc trò chuyện (cả buổi, tự động cập nhật):\n" + conversation_digest)
+
+    # Conversation window (time + silence-gap + count + char budget bounded)
+    if include_chat:
+        convo = build_conversation_transcript(
+            room.messages, char_budget=chat_char_budget, exclude_last_text=exclude_last_text
+        )
+        if convo["text"]:
+            header = (
+                f"Cuộc trò chuyện hiện tại ({convo['count']} tin, từ {convo['since']} đến {convo['now']}"
+                + (f", đã lược bớt {convo['omitted']} tin cũ hơn" if convo["omitted"] else "")
+                + "):"
+            )
+            lines.append(header + "\n" + convo["text"])
 
     return "\n\n".join(lines)
+
+
+# ---- Conversation understanding -------------------------------------------------------------------
+VN_TZ = timezone(timedelta(hours=7))
+CONVO_WINDOW_SEC = 45 * 60      # only the last 45 minutes matter
+CONVO_GAP_SEC = 20 * 60         # >20 min of silence = the previous conversation is over
+CONVO_MAX_MSGS = 40
+CONVO_MSG_MAX_CHARS = 280
+CONVO_AI_MAX_CHARS = 220
+
+# System events worth knowing about (song changes, skips, queue...). Joins/leaves are noise.
+_CONVO_SKIP_SYSTEM_RE = re.compile(r"(đã vào phòng|đã rời phòng|rời khỏi phòng|tham gia phòng)", re.IGNORECASE)
+
+
+def _hhmm(ts: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts), VN_TZ).strftime("%H:%M")
+    except Exception:
+        return "--:--"
+
+
+def _format_convo_line(m: Dict[str, Any]) -> Optional[str]:
+    t = _hhmm(m.get("timestamp"))
+    mtype = m.get("type")
+    text = re.sub(r"\s+", " ", str(m.get("text") or "")).strip()
+    if mtype == "system":
+        if not text or _CONVO_SKIP_SYSTEM_RE.search(text):
+            return None
+        return f"[{t}] (sự kiện) {text[:140]}"
+    if mtype != "chat":
+        return None
+    name = m.get("user_name") or "Khách"
+    media = {"gif": "[gửi GIF]", "sticker": "[gửi sticker]", "image": "[gửi ảnh]"}.get(str(m.get("media_type") or ""), "")
+    if m.get("is_ai"):
+        body = text[:CONVO_AI_MAX_CHARS] + ("…" if len(text) > CONVO_AI_MAX_CHARS else "")
+        sugg = [str(s.get("title", ""))[:50] for s in (m.get("suggested_tracks") or []) if s.get("title")]
+        if sugg:
+            body += f" [kèm gợi ý: {'; '.join(sugg)}]"
+        return f"[{t}] {name} (chính bạn): {body}"
+    if not text and not media:
+        return None
+    body = text[:CONVO_MSG_MAX_CHARS] + ("…" if len(text) > CONVO_MSG_MAX_CHARS else "")
+    host = " (chủ phòng)" if m.get("is_host") else ""
+    return f"[{t}] {name}{host}: {' '.join(x for x in (media, body) if x)}"
+
+
+def build_conversation_transcript(
+    messages: List[Dict[str, Any]],
+    *,
+    now: Optional[float] = None,
+    window_sec: int = CONVO_WINDOW_SEC,
+    gap_sec: int = CONVO_GAP_SEC,
+    max_msgs: int = CONVO_MAX_MSGS,
+    char_budget: int = 3500,
+    exclude_last_text: str = "",
+) -> Dict[str, Any]:
+    """Bounded transcript of the CURRENT conversation so the bot understands what is going on.
+
+    Walks backwards from the newest message and stops at whichever comes first: older than `window_sec`,
+    a silence gap longer than `gap_sec` (an earlier, finished conversation), `max_msgs`, or `char_budget`.
+    """
+    now = now or time.time()
+    msgs = list(messages or [])
+    # The triggering message is passed to the model separately; don't duplicate it
+    if exclude_last_text and msgs:
+        for i in range(len(msgs) - 1, max(-1, len(msgs) - 4), -1):
+            if msgs[i].get("type") == "chat" and (msgs[i].get("text") or "").strip() == exclude_last_text.strip():
+                msgs = msgs[:i] + msgs[i + 1:]
+                break
+
+    picked: List[str] = []
+    used = 0
+    last_ts: Optional[float] = None
+    first_ts: Optional[float] = None
+    stopped_early = False
+    idx = len(msgs) - 1
+    while idx >= 0:
+        m = msgs[idx]
+        ts = float(m.get("timestamp") or 0) or now
+        if now - ts > window_sec:
+            break
+        if last_ts is not None and last_ts - ts > gap_sec:
+            break
+        line = _format_convo_line(m)
+        if line:
+            if len(picked) >= max_msgs or used + len(line) + 1 > char_budget:
+                stopped_early = True
+                break
+            picked.append(line)
+            used += len(line) + 1
+            first_ts = ts
+        last_ts = ts
+        idx -= 1
+
+    omitted = 0
+    if stopped_early:
+        omitted = sum(
+            1 for m in msgs[: idx + 1]
+            if now - float(m.get("timestamp") or now) <= window_sec and _format_convo_line(m)
+        )
+    picked.reverse()
+    return {
+        "text": "\n".join(picked),
+        "count": len(picked),
+        "omitted": omitted,
+        "since": _hhmm(first_ts) if first_ts else _hhmm(now),
+        "now": _hhmm(now),
+    }
+
+
+# ---- Rolling conversation digest ------------------------------------------------------------------
+# The verbatim transcript covers only the latest messages. A background LLM digest compresses the WHOLE
+# current session (up to DIGEST_WINDOW_SEC, split at long silences) into topics / threads / stances /
+# open questions / mood, so the bot understands everything that happened without a huge prompt.
+DIGEST_WINDOW_SEC = 3 * 3600
+DIGEST_GAP_SEC = 30 * 60
+DIGEST_MIN_MSGS = 8            # short conversations: the verbatim transcript is already enough
+DIGEST_REFRESH_EVERY = 6       # new chat messages before the digest is refreshed
+DIGEST_REFRESH_MAX_AGE = 180   # ...or this many seconds when at least 1 new message arrived
+
+_digest_state: Dict[str, Dict[str, Any]] = {}
+_digest_inflight: Dict[str, "asyncio.Task[None]"] = {}
+
+
+def _last_chat_ts(messages: List[Dict[str, Any]]) -> float:
+    for m in reversed(messages):
+        if m.get("type") == "chat":
+            return float(m.get("timestamp") or 0)
+    return 0.0
+
+
+def _chat_msgs_since(messages: List[Dict[str, Any]], ts: float) -> int:
+    # room.messages is capped at 100, so count by timestamp instead of by list length
+    return sum(1 for m in messages if m.get("type") == "chat" and float(m.get("timestamp") or 0) > ts)
+
+
+async def _summarize_conversation(transcript: str) -> str:
+    raw = await groq_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Bạn tóm tắt diễn biến cuộc trò chuyện trong một phòng nghe nhạc chung, để một trợ lý AI đọc và hiểu toàn bộ bối cảnh.\n"
+                    "Chỉ dựa trên nội dung được cung cấp, KHÔNG suy diễn hay bịa thêm. Viết tiếng Việt ngắn gọn, giữ đúng tên người.\n"
+                    "Trả về JSON:\n"
+                    '{"topics": ["chủ đề chính đang/đã bàn"], '
+                    '"threads": [{"topic": "mạch chuyện", "who": "ai tham gia", "summary": "diễn biến + quan điểm từng người", "status": "đang bàn | đã chốt | bỏ ngỏ"}], '
+                    '"open_questions": ["câu hỏi/yêu cầu chưa ai trả lời hoặc chưa xử lý, ghi rõ ai hỏi"], '
+                    '"agreements": ["điều cả phòng đã thống nhất / kế hoạch"], '
+                    '"requests_to_bot": ["những gì thành viên đã nhờ Em bé floor 2 và Em bé đã trả lời ra sao"], '
+                    '"mood": "không khí phòng và cảm xúc nổi bật của từng người", '
+                    '"inside_jokes": ["câu đùa / biệt danh / meme riêng của phòng nếu có"]}\n'
+                    "Tối đa 6 threads, mỗi mục ngắn gọn. Mục nào không có thì để mảng rỗng."
+                ),
+            },
+            {"role": "user", "content": transcript},
+        ],
+        temperature=0.2,
+        max_tokens=700,
+        json_mode=True,
+    )
+    d = _parse_json_lenient(raw or "")
+    if not d:
+        return ""
+
+    def _items(key: str, n: int) -> List[str]:
+        v = d.get(key)
+        return [str(x).strip()[:220] for x in (v if isinstance(v, list) else []) if str(x).strip()][:n]
+
+    out: List[str] = []
+    topics = _items("topics", 6)
+    if topics:
+        out.append("Chủ đề: " + "; ".join(topics))
+    threads = d.get("threads") if isinstance(d.get("threads"), list) else []
+    for th in threads[:6]:
+        if isinstance(th, dict) and th.get("summary"):
+            out.append(
+                f"- [{str(th.get('status') or '').strip()[:20]}] {str(th.get('topic') or '').strip()[:80]}"
+                f" ({str(th.get('who') or '').strip()[:80]}): {str(th.get('summary')).strip()[:300]}"
+            )
+    for key, label in (
+        ("open_questions", "Còn bỏ ngỏ"),
+        ("agreements", "Đã thống nhất"),
+        ("requests_to_bot", "Đã nhờ Em bé"),
+        ("inside_jokes", "Chuyện riêng của phòng"),
+    ):
+        items = _items(key, 5)
+        if items:
+            out.append(f"{label}: " + "; ".join(items))
+    mood = str(d.get("mood") or "").strip()
+    if mood:
+        out.append(f"Không khí: {mood[:240]}")
+    return _strip_stray_cjk("\n".join(out))[:2200]
+
+
+async def refresh_conversation_digest(room: Any) -> None:
+    """(Re)build the digest of the room's current conversation session."""
+    convo = build_conversation_transcript(
+        room.messages, window_sec=DIGEST_WINDOW_SEC, gap_sec=DIGEST_GAP_SEC, max_msgs=100, char_budget=8000
+    )
+    state = {"digest": "", "last_ts": _last_chat_ts(room.messages), "updated": time.time(), "msgs": convo["count"]}
+    if convo["count"] >= DIGEST_MIN_MSGS:
+        try:
+            state["digest"] = await _summarize_conversation(convo["text"])
+        except Exception as exc:
+            print(f"[ai digest err] {type(exc).__name__} {exc}")
+            prev = _digest_state.get(room.id)
+            if prev:
+                state["digest"] = prev.get("digest", "")
+    _digest_state[room.id] = state
+
+
+def schedule_conversation_digest(room: Any, *, force: bool = False) -> Optional["asyncio.Task[None]"]:
+    """Debounced background refresh; call after every new chat message. Never blocks the caller."""
+    if not key_rotator.is_configured():
+        return None
+    running = _digest_inflight.get(room.id)
+    if running and not running.done():
+        return running
+    state = _digest_state.get(room.id)
+    total = _chat_msgs_since(room.messages, 0.0)
+    if not force and state:
+        new_msgs = _chat_msgs_since(room.messages, float(state.get("last_ts", 0)))
+        if new_msgs <= 0:
+            return None
+        if new_msgs < DIGEST_REFRESH_EVERY and time.time() - float(state.get("updated", 0)) < DIGEST_REFRESH_MAX_AGE:
+            return None
+    if not force and not state and total < DIGEST_MIN_MSGS:
+        return None
+    try:
+        task = asyncio.get_running_loop().create_task(refresh_conversation_digest(room))
+    except RuntimeError:
+        return None
+    _digest_inflight[room.id] = task
+    task.add_done_callback(lambda _t, rid=room.id: _digest_inflight.pop(rid, None))
+    return task
+
+
+async def get_conversation_digest(room: Any, *, wait_sec: float = 4.0) -> str:
+    """Digest for the bot's reply: use the cached one, or wait briefly for a fresh one on long chats."""
+    state = _digest_state.get(room.id)
+    running = _digest_inflight.get(room.id)
+    convo_len = build_conversation_transcript(
+        room.messages, window_sec=DIGEST_WINDOW_SEC, gap_sec=DIGEST_GAP_SEC, max_msgs=100, char_budget=100_000
+    )["count"]
+    if convo_len < DIGEST_MIN_MSGS:
+        return ""
+    if not state and not running:
+        running = schedule_conversation_digest(room, force=True)
+    if running and not running.done() and (not state or not state.get("digest")):
+        try:
+            await asyncio.wait_for(asyncio.shield(running), timeout=wait_sec)
+        except Exception:
+            pass
+        state = _digest_state.get(room.id)
+    return (state or {}).get("digest", "")
+
+
+def forget_conversation_digest(room_id: str) -> None:
+    _digest_state.pop(room_id, None)
 
 
 def extract_lyrics_excerpt(lyrics_data: Optional[Dict[str, Any]], max_lines: int = 12) -> str:
@@ -432,6 +714,48 @@ MOOD_HIT_CATALOG: Dict[str, Dict[str, Any]] = {
             ("Không Phải Dạng Vừa Đâu", "Sơn Tùng M-TP"), ("Một Nhà", "Da LAB"),
         ],
     },
+    # ---- Genre groups: used when the user asks for a GENRE (rap, indie, US-UK, Kpop...) ----
+    "rap": {
+        "label": "THỂ LOẠI Rap / Hip-hop (Việt & quốc tế)",
+        "songs": [
+            ("Bigcityboi", "Binz, Touliver"), ("Gene", "Binz, Touliver"), ("They Said", "Binz, Touliver"),
+            ("Cho Mình Em", "Binz, Đen"), ("Không Thể Say", "HIEUTHUHAI"), ("Exit Sign", "HIEUTHUHAI"),
+            ("Ai Cũng Phải Bắt Đầu Từ Đâu Đó", "HIEUTHUHAI"), ("Chìm Sâu", "RPT MCK, Trung Trần"),
+            ("Tại Vì Sao", "RPT MCK"), ("Anh Đã Ổn Hơn", "RPT MCK"), ("Va Vào Giai Điệu Này", "RPT MCK"),
+            ("Đánh Đổi", "Obito"), ("Simple Love", "Obito, Seachains"), ("Gái Độc Thân", "tlinh"),
+            ("Nếu Lúc Đó", "tlinh"), ("Bài Này Chill Phết", "Đen, MIN"), ("Trốn Tìm", "Đen, MTV"),
+            ("Hai Triệu Năm", "Đen, Biên"), ("Ghé Qua", "Dick, Tofu, PC"), ("Một Nhà", "Da LAB"),
+            ("Tình Đắng Như Ly Cafe", "Nân, Ngơ"), ("Bạn Đời", "Karik, GDucky"),
+            ("Người Lạ Ơi", "Superbrothers, Orange, Karik"),
+            ("Lose Yourself", "Eminem"), ("Rap God", "Eminem"), ("HUMBLE.", "Kendrick Lamar"),
+            ("Not Like Us", "Kendrick Lamar"), ("SICKO MODE", "Travis Scott"), ("God's Plan", "Drake"),
+        ],
+    },
+    "indie": {
+        "label": "THỂ LOẠI Indie / Underground Việt",
+        "songs": [
+            ("Em Dạo Này", "Ngọt"), ("Cho Tôi Đi Theo", "Ngọt"), ("Mascara", "Chillies"), ("Lạ Lùng", "Vũ."),
+            ("Bước Qua Mùa Cô Đơn", "Vũ."), ("Nàng Thơ", "Hoàng Dũng"), ("Một Đêm Say", "Thịnh Suy"),
+            ("Có Em", "Madihu, Low G"), ("Hôm Nay Tôi Buồn", "Phùng Khánh Linh"), ("Chuyện Đôi Ta", "Emcee L, Muộii"),
+        ],
+    },
+    "us_uk": {
+        "label": "THỂ LOẠI Pop US-UK",
+        "songs": [
+            ("Shape of You", "Ed Sheeran"), ("Blinding Lights", "The Weeknd"), ("Flowers", "Miley Cyrus"),
+            ("As It Was", "Harry Styles"), ("STAY", "The Kid LAROI, Justin Bieber"), ("See You Again", "Wiz Khalifa, Charlie Puth"),
+            ("Someone Like You", "Adele"), ("Die With A Smile", "Lady Gaga, Bruno Mars"), ("Espresso", "Sabrina Carpenter"),
+            ("Birds of a Feather", "Billie Eilish"),
+        ],
+    },
+    "kpop": {
+        "label": "THỂ LOẠI Kpop",
+        "songs": [
+            ("Dynamite", "BTS"), ("Butter", "BTS"), ("How You Like That", "BLACKPINK"), ("Pink Venom", "BLACKPINK"),
+            ("APT.", "ROSÉ, Bruno Mars"), ("Super Shy", "NewJeans"), ("Ditto", "NewJeans"), ("Seven", "Jung Kook"),
+            ("Magnetic", "ILLIT"),
+        ],
+    },
 }
 
 
@@ -447,8 +771,163 @@ def catalog_songs_for_mood(mood: str) -> List[Dict[str, str]]:
     grp = MOOD_HIT_CATALOG.get((mood or "").strip().lower())
     if not grp:
         return []
-    return [{"title": t, "artist": a, "reason": f"Bản hit hợp tâm trạng {grp['label'].split(' / ')[0].lower()}"}
-            for t, a in grp["songs"]]
+    head = grp["label"].split(" / ")[0]
+    if head.startswith("THỂ LOẠI "):
+        reason = f"Bản hit {head[len('THỂ LOẠI '):]} đình đám"
+    else:
+        reason = f"Bản hit hợp tâm trạng {head.lower()}"
+    return [{"title": t, "artist": a, "reason": reason} for t, a in grp["songs"]]
+
+
+_MUSIC_REQ_KEYWORDS = (
+    "nhac", "bai", "rap", "hip hop", "hiphop", "kpop", "k pop", "us uk", "au my", "ballad", "edm", "indie",
+    "bolero", "lofi", "remix", "playlist", "goi y", "nghe gi", "song", "music", "mood", "tam trang",
+    "buon", "chill", "quay", "thu gian", "co don", "that tinh", "ca si", "hit", "trending", "giai dieu",
+)
+
+
+_FACT_CHECK_KEYWORDS = (
+    "confirm", "xac nhan", "ai dung", "ai sai", "dung khong", "dung ko", "sai khong", "phai khong", "phai ko",
+    "co phai", "phan xu", "noi xem", "kiem chung", "check giup", "check gium", "that khong", "that ko",
+    "ai hat", "ai sang tac", "nam nao", "ra nam", "phat hanh", "tranh cai", "cai nhau",
+)
+
+
+def _tidy_reply(text: str) -> str:
+    """Models sometimes double-escape newlines inside JSON (a literal backslash-n shows up in chat)."""
+    t = str(text or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return _strip_stray_cjk(t.strip())[:900]
+
+
+def is_fact_check_request(text: str) -> bool:
+    """Members asking the bot to confirm / settle a debate / answer a factual music question."""
+    norm = " " + " ".join(_fold(strip_ai_mention(text)).split()) + " "
+    return any(f" {kw} " in norm for kw in _FACT_CHECK_KEYWORDS)
+
+
+def looks_like_music_request(text: str) -> bool:
+    """Cheap local pre-check so casual chat skips the extra planner call + YouTube search."""
+    norm = " " + " ".join(_fold(strip_ai_mention(text)).split()) + " "
+    return any(f" {kw}" in norm for kw in _MUSIC_REQ_KEYWORDS)
+
+
+async def plan_music_request(user_message: str, recent_chat: str = "") -> Optional[Dict[str, Any]]:
+    """Step 1 of grounded suggestions: turn a chat message into a mood/genre code + YouTube search queries."""
+    clean_q = strip_ai_mention(user_message)
+    codes = ", ".join(f"{k} ({v['label']})" for k, v in MOOD_HIT_CATALOG.items())
+    raw = await groq_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Bạn phân tích tin nhắn trong phòng nghe nhạc để tìm bài trên YouTube.\n"
+                    'Trả về JSON: {"is_music_request": true, "mood": "mã", "queries": ["...", "..."]}\n'
+                    "- is_music_request: true nếu người dùng muốn nghe / xin gợi ý / tìm nhạc (kể cả gián tiếp như 'buồn quá'), ngược lại false. "
+                    "Nhờ xác nhận / phân xử / hỏi thông tin về bài hát hay ca sĩ (ai hát, năm nào, ai đúng...) mà KHÔNG xin nghe thêm nhạc thì là false.\n"
+                    f"- mood: đúng 1 mã trong: {codes}. Nếu có THỂ LOẠI (rap, indie, us_uk, kpop) thì dùng mã thể loại.\n"
+                    "- queries: 2 câu tìm kiếm YouTube ngắn (tối đa 7 từ), viết tiếng Việt CÓ DẤU, để ra các BÀI HÁT LẺ chính thức "
+                    "(không phải playlist, tổng hợp, mix), đúng thể loại và tâm trạng, ưu tiên bài đang hoặc từng rất trending. Thêm 'official mv' ở cuối. "
+                    "Câu thứ 2 kèm tên 1 nghệ sĩ CHẮC CHẮN thuộc đúng thể loại đó (ví dụ hỏi rap thì phải là rapper như HIEUTHUHAI, "
+                    "RPT MCK, Binz, Đen, tlinh, Obito; KHÔNG dùng ca sĩ pop/ballad). "
+                    "Nếu người dùng nêu tên bài hoặc ca sĩ cụ thể thì câu đầu phải là đúng bài hoặc ca sĩ đó."
+                ),
+            },
+            {"role": "user", "content": f"Chat gần đây:\n{recent_chat[:600]}\n\nTin nhắn mới: {clean_q}"},
+        ],
+        temperature=0.3,
+        max_tokens=220,
+        json_mode=True,
+    )
+    parsed = _parse_json_lenient(raw or "")
+    if not parsed:
+        return None
+    queries = [
+        _strip_stray_cjk(str(q)).strip()[:80]
+        for q in (parsed.get("queries") or [])
+        if isinstance(q, str) and q.strip()
+    ][:3]
+    mood = str(parsed.get("mood") or "").strip().lower()
+    return {
+        "is_music_request": bool(parsed.get("is_music_request")),
+        "mood": mood if mood in MOOD_HIT_CATALOG else "",
+        "queries": queries,
+    }
+
+
+def _candidate_title_keys(c: Dict[str, Any]) -> List[str]:
+    """Folded song-title variants of a YouTube upload ('ARTIST - SONG ft. X' -> 'song ft x', 'song', ...)."""
+    raw_title = c.get("title", "")
+    author_key = " ".join(_fold(c.get("author", "")).split())
+    # "SƠN TÙNG M-TP | HÃY TRAO CHO ANH ft. ..." keeps the song after the pipe, so clean every pipe segment
+    segments = [clean_song_title(seg) for seg in re.split(r"[|｜]", raw_title) if seg.strip()] or [clean_song_title(raw_title)]
+    parts = set()
+    for seg in segments:
+        parts |= {p.strip() for p in re.split(r"\s[-–—]\s", seg) if p.strip()} | {seg}
+    keys = set()
+    for p in parts:
+        k = " ".join(_fold(p).split())
+        if k and k != author_key:
+            keys.add(k)
+            base = re.split(r"\s(?:ft|feat|x)\s", k)[0].strip()  # drop "ft. ..." tails
+            if base and base != author_key:
+                keys.add(base)
+    return sorted(keys, key=len, reverse=True)
+
+
+def _match_candidates_in_text(text: str, cands: List[Dict[str, Any]], limit: int = 3) -> List[Dict[str, Any]]:
+    """Map the songs a reply lists to the numbered YouTube candidates.
+
+    Uses the **bold** song names of the bullet list (in order) so generic words in the prose (e.g. "buồn")
+    never match a candidate titled "BUỒN". Falls back to scanning plain text when there is no bold name.
+    """
+    bold_names = [" ".join(_fold(n).split()) for n in re.findall(r"\*\*(.+?)\*\*", text or "")]
+    bold_names = [n for n in bold_names if len(n) >= 2]
+    if bold_names:
+        out: List[Dict[str, Any]] = []
+        for name in bold_names:
+            # Exact title match beats containment; among containments the longest overlap wins
+            best, best_score = None, 0
+            for c in cands:
+                if c in out:
+                    continue
+                for k in _candidate_title_keys(c):
+                    if k == name:
+                        score = 10_000
+                    elif len(k) >= 4 and f" {k} " in f" {name} ":
+                        score = len(k)
+                    elif len(name) >= 4 and f" {name} " in f" {k} ":
+                        score = len(name)
+                    else:
+                        continue
+                    if score > best_score:
+                        best, best_score = c, score
+            if best:
+                out.append(best)
+            if len(out) >= limit:
+                break
+        return out
+
+    folded = " " + " ".join(_fold(text).split()) + " "
+    found: List[Tuple[int, Dict[str, Any]]] = []
+    for c in cands:
+        title = clean_song_title(c.get("title", ""))
+        # Typical "ARTIST - SONG" uploads: try each dash-separated part, longest first
+        parts = sorted({p.strip() for p in re.split(r"\s[-–—]\s", title) if p.strip()} | {title}, key=len, reverse=True)
+        author_key = " ".join(_fold(c.get("author", "")).split())
+        for part in parts:
+            key = " ".join(_fold(part).split())
+            if len(key) >= 4 and key != author_key:
+                pos = folded.find(f" {key} ")
+                if pos >= 0:
+                    found.append((pos, c))
+                    break
+    found.sort(key=lambda x: x[0])
+    out: List[Dict[str, Any]] = []
+    for _, c in found:
+        if c not in out:
+            out.append(c)
+    return out[:limit]
 
 
 async def chat_with_em_be_floor_2(
@@ -457,29 +936,76 @@ async def chat_with_em_be_floor_2(
     user_message: str,
     youtube_candidates: Optional[List[Dict[str, Any]]] = None,
     avoid_titles: Optional[List[str]] = None,
+    mood_hint: str = "",
 ) -> Dict[str, Any]:
-    """Conversational AI assistant '@Em bé floor 2' that knows full room context & can suggest trending songs."""
+    """Conversational AI assistant '@Em bé floor 2' that knows full room context & can suggest trending songs.
+
+    With `youtube_candidates` (real, live YouTube results) the model must pick ONLY from that numbered list
+    and returns `picks` (indices). Without candidates it falls back to the curated MOOD_HIT_CATALOG.
+    """
     clean_q = strip_ai_mention(user_message) or "Chào Em bé floor 2!"
     avoid_block = ""
     if avoid_titles:
         avoid_block = "\n\n=== BÀI ĐÃ CÓ TRONG PHÒNG / VỪA GỢI Ý (KHÔNG GỢI Ý LẠI) ===\n" + "; ".join(avoid_titles[:30])
 
+    cands = [c for c in (youtube_candidates or []) if c.get("title")][:16]
+    grounded = len(cands) > 0
     cand_block = ""
-    if youtube_candidates:
-        c_lines = [
-            f"  - \"{c.get('title', '')}\" — {c.get('author', '')} ({c.get('duration_str', '')})"
-            for c in youtube_candidates[:10]
-            if c.get("title")
-        ]
-        if c_lines:
-            cand_block = "\n\n=== ỨNG VIÊN BÀI HÁT THẬT & ĐANG TRENDING TRÊN YOUTUBE ===\n" + "\n".join(c_lines)
+    if grounded:
+        c_lines = []
+        for i, c in enumerate(cands, 1):
+            views = str(c.get("views") or "").replace("\xa0", " ").strip()
+            extra = ", ".join(x for x in (c.get("duration_str") or "", views) if x)
+            c_lines.append(f"  [{i}] {c.get('title', '')} — {c.get('author', '')}" + (f" ({extra})" if extra else ""))
+        cand_block = "\n\n=== ỨNG VIÊN BÀI HÁT THẬT VỪA TÌM TRÊN YOUTUBE (đánh số) ===\n" + "\n".join(c_lines)
+        if mood_hint:
+            cand_block += f"\nMã yêu cầu đã phân tích sơ bộ: {mood_hint}"
 
+    reason_rule = "     Lý do (reason) phải ĐÚNG SỰ THẬT về bài hát; không bịa đặc điểm (ví dụ không gọi bài pop là 'lối rap').\n"
+    reply_example = (
+        '"reply": "Câu mở đầu đồng cảm 🥺\\n\\n- **Tên bài 1** – Ca sĩ: lý do ngắn\\n'
+        '- **Tên bài 2** – Ca sĩ: lý do ngắn\\n\\nCâu chốt ấm áp 💕"'
+    )
+    if grounded:
+        pick_rules = (
+            "  3. CHỈ ĐƯỢC CHỌN từ danh sách ỨNG VIÊN đánh số (bài có thật vừa tìm trên YouTube) và ghi số thứ tự vào `picks` theo thứ tự gợi ý. "
+            "Ưu tiên bài lượt xem cao (Tr = triệu lượt xem) và bài hát lẻ chính thức; bỏ qua ứng viên sai thể loại / tâm trạng, video tổng hợp, live, reaction. "
+            "Trong `reply` viết tên bài gọn gàng (bỏ Official MV, | ...) và đúng ca sĩ. Đa dạng ca sĩ, mỗi ca sĩ tối đa 1 bài. "
+            "Nếu không đủ 3 ứng viên phù hợp thì chỉ chọn số bài phù hợp.\n" + reason_rule
+        )
+        catalog_block = ""
+        json_spec = "{" + reply_example + ', "mood": "buon", "picks": [3, 1, 7]}'
+    else:
+        pick_rules = (
+            "  3. Ưu tiên chọn từ KHO HIT bên dưới (đều là bài có thật, đang hoặc từng rất trending). Có thể thêm bản hit có thật khác "
+            "nếu chắc chắn đúng tên bài, ca sĩ và thể loại. Đa dạng ca sĩ, mỗi ca sĩ tối đa 1 bài.\n" + reason_rule
+        )
+        catalog_block = f"=== KHO HIT TRENDING THEO TÂM TRẠNG / THỂ LOẠI ===\n{format_mood_catalog()}\n\n"
+        json_spec = (
+            "{" + reply_example
+            + ', "mood": "buon", "suggested_songs": [{"title": "Tên bài hát chuẩn", "artist": "Tên ca sĩ chính xác"}]}'
+        )
+
+    codes = ", ".join(MOOD_HIT_CATALOG.keys())
     system_prompt = (
         f"Bạn là '{AI_BOT_NAME}' — trợ lý AI dễ thương, thông minh, hoạt bát, thân thiện của phòng nghe nhạc Floor 2 Studio.\n"
         "Phong cách & Quy tắc:\n"
         "- Trả lời 100% bằng TIẾNG VIỆT tự nhiên, gần gũi, dí dỏm (TUYỆT ĐỐI KHÔNG chèn chữ Hán / tiếng Trung vào câu trả lời), xưng 'mình' hoặc 'Em bé' và gọi tên thành viên khi phù hợp.\n"
         "- Có thể tán gẫu MỌI CHỦ ĐỀ với thành viên (âm nhạc, đời sống, công việc, code, tâm sự, đùa vui, phim ảnh...), KHÔNG bị giới hạn chỉ hỏi về nhạc.\n"
         "- Luôn tận dụng ngữ cảnh phòng (tên phòng, bài đang phát & nội dung lời bài hát, bài sắp phát, gu nhạc từng thành viên, mạch chat gần đây) để trả lời sâu sắc và đúng trọng tâm.\n"
+        "- HIỂU TOÀN BỘ NGỮ CẢNH HỘI THOẠI (quan trọng nhất). Bạn có 2 nguồn:\n"
+        "  (a) 'Tóm tắt diễn biến cuộc trò chuyện': bức tranh toàn cảnh cả buổi (chủ đề, mạch chuyện, ai nói gì, câu hỏi còn bỏ ngỏ, điều đã thống nhất, không khí, việc đã nhờ bạn).\n"
+        "  (b) 'Cuộc trò chuyện hiện tại': nguyên văn các tin gần nhất (giờ gửi, người gửi, sự kiện đổi bài, và cả những gì chính bạn đã nói).\n"
+        "  Hãy trả lời như một thành viên đã ngồi trong phòng từ đầu, áp dụng cho MỌI tình huống, ví dụ:\n"
+        "  • Hiểu tin nhắn mới đang tiếp nối mạch nào, ai đang nói với ai; hiểu từ thay thế và nói tắt ('bài đó', 'ông kia', 'như nãy', 'vụ hồi nãy', 'cái đó', 'đúng không').\n"
+        "  • Tranh luận / nhờ xác nhận: tóm tắt ý từng người theo tên, rồi đưa '**Kết luận:** ...' (đúng / sai / đúng một phần) kèm lý do ngắn; trung lập, vui vẻ.\n"
+        "  • Hỏi lại chuyện đã nói ('nãy ai nói gì', 'tóm tắt giùm', 'mọi người đang bàn gì'): trả lời theo đúng diễn biến, đúng người, đúng thứ tự.\n"
+        "  • Kế hoạch / thống nhất trong phòng (sẽ mở bài gì, đi đâu, hẹn gì), câu hỏi chưa ai trả lời, lời nhờ bạn từ trước: nhớ và nhắc lại hoặc làm tiếp cho đúng.\n"
+        "  • Cảm xúc của từng người và không khí phòng (vui, căng, buồn, đang trêu nhau): phản hồi hợp tình huống, hiểu câu đùa và trò đùa riêng của phòng.\n"
+        "  • Sự kiện trong phòng (bài vừa đổi, ai vừa thêm bài, vote qua bài) và lời bài đang phát: dùng khi liên quan.\n"
+        "  Không hỏi lại điều đã có trong ngữ cảnh. Giữ nhất quán với những gì bạn đã nói trước đó; nếu trước đó bạn sai thì thừa nhận và sửa.\n"
+        "  Ngữ cảnh chỉ để hiểu: chỉ khẳng định dữ kiện bạn chắc chắn, không chắc thì nói rõ, TUYỆT ĐỐI KHÔNG bịa dữ kiện. "
+        "Không gợi ý bài hát nếu người dùng không xin nhạc.\n"
         "- Giữ câu trả lời súc tích, dễ đọc trong khung chat, dùng 1–3 emoji vừa phải.\n"
         "- TRÌNH BÀY `reply` CÓ BỐ CỤC, KHÔNG viết dồn 1 đoạn dài (dùng ký tự xuống dòng \\n trong chuỗi JSON):\n"
         "  • Tán gẫu thường: 1–2 đoạn ngắn (mỗi đoạn 1–2 câu), các đoạn cách nhau bằng 1 dòng trống (\\n\\n).\n"
@@ -488,18 +1014,22 @@ async def chat_with_em_be_floor_2(
         "  • Khi liệt kê ý / hướng dẫn: dùng gạch đầu dòng '- ' hoặc '1. '. Dùng **in đậm** cho tên bài hoặc ý chính, không lạm dụng.\n"
         "  • KHÔNG dùng tiêu đề markdown (#), bảng hay code block.\n"
         "- Khi người dùng nhờ gợi ý bài hát / tìm nhạc (kể cả nói gián tiếp như 'tôi đang buồn quá', 'có bài nào hợp lúc này không'):\n"
-        "  1. XÁC ĐỊNH ĐÚNG TÂM TRẠNG trong tin nhắn mới nhất và mạch chat gần đây (buồn, cô đơn, mưa/hoài niệm, chill, yêu, vui, động lực) rồi đặt vào trường `mood` bằng đúng 1 mã trong ngoặc vuông của KHO HIT bên dưới.\n"
-        "  2. Gợi ý đúng 3 bài KHỚP ĐÚNG TÂM TRẠNG ĐÓ. Người buồn thì gợi ý bài buồn, an ủi; TUYỆT ĐỐI KHÔNG đưa bài tình yêu vui tươi cho người đang buồn.\n"
-        "  3. Ưu tiên chọn từ KHO HIT TRENDING THEO TÂM TRẠNG bên dưới (đều là bài có thật, đang hoặc từng rất trending). Có thể thêm bản hit có thật khác nếu chắc chắn đúng tên bài và ca sĩ. Đa dạng ca sĩ, mỗi ca sĩ tối đa 1 bài.\n"
+        f"  1. XÁC ĐỊNH ĐÚNG YÊU CẦU trong tin nhắn mới nhất và mạch chat gần đây rồi đặt vào trường `mood` bằng đúng 1 mã trong: {codes}.\n"
+        "     - Nếu người dùng nêu THỂ LOẠI (rap, hip-hop, indie, US-UK, nhạc Âu Mỹ, Kpop...) thì THỂ LOẠI LÀ ƯU TIÊN SỐ 1: dùng mã thể loại (rap, indie, us_uk, kpop). "
+        "Các từ như 'cực cháy', 'chill', 'buồn' đi kèm chỉ để chọn bài nào trong thể loại đó (ví dụ 'rap cực cháy' -> bài rap sôi động, 'rap buồn' -> bài rap tâm trạng).\n"
+        "     - Nếu chỉ nêu tâm trạng thì dùng mã tâm trạng (buon, co_don, mua, chill, yeu, vui, dong_luc).\n"
+        "  2. Gợi ý đúng 3 bài KHỚP ĐÚNG YÊU CẦU ĐÓ. Hỏi rap thì CẢ 3 bài phải là bài rap/hip-hop thật sự (có phần rap là chủ đạo); "
+        "TUYỆT ĐỐI KHÔNG đưa bài pop, ballad, nhạc dance và gọi đó là rap. "
+        "Người buồn thì gợi ý bài buồn, an ủi; KHÔNG đưa bài tình yêu vui tươi cho người đang buồn.\n"
+        f"{pick_rules}"
         "  4. Nếu người dùng nêu tên một bài hoặc ca sĩ cụ thể, bài đầu tiên phải là đúng bản gốc chính chủ đó.\n"
         "  5. Gu nhạc của thành viên và lịch sử phòng CHỈ để tham khảo; KHÔNG gợi ý lại các bài trong mục 'KHÔNG GỢI Ý LẠI'.\n"
         "  6. KHÔNG chọn bản Interlude/Intro/Outro, remix, cover; KHÔNG bịa tên bài.\n"
-        "  7. Trong `reply`, đồng cảm đúng tâm trạng người dùng và liệt kê CHÍNH XÁC các bài trong `suggested_songs` theo đúng thứ tự, mỗi bài 1 dòng như quy tắc trình bày ở trên.\n"
-        "- Nếu người dùng chỉ tán gẫu bình thường (không xin gợi ý nhạc), để `suggested_songs` là mảng rỗng `[]` và `mood` là chuỗi rỗng.\n\n"
-        f"=== KHO HIT TRENDING THEO TÂM TRẠNG ===\n{format_mood_catalog()}\n\n"
+        "  7. Trong `reply`, đồng cảm đúng tâm trạng người dùng và liệt kê CHÍNH XÁC các bài đã chọn theo đúng thứ tự, mỗi bài 1 dòng như quy tắc trình bày ở trên.\n"
+        "- Nếu người dùng chỉ tán gẫu bình thường (không xin gợi ý nhạc), để danh sách bài là mảng rỗng `[]` và `mood` là chuỗi rỗng.\n\n"
+        f"{catalog_block}"
         "LUÔN trả về đúng định dạng JSON:\n"
-        '{"reply": "Câu mở đầu đồng cảm 🥺\\n\\n- **Tên bài 1** – Ca sĩ: lý do ngắn\\n- **Tên bài 2** – Ca sĩ: lý do ngắn\\n\\nCâu chốt ấm áp 💕", '
-        '"mood": "buon", "suggested_songs": [{"title": "Tên bài hát chuẩn", "artist": "Tên ca sĩ chính xác"}]}'
+        f"{json_spec}"
     )
 
     user_prompt = (
@@ -509,21 +1039,40 @@ async def chat_with_em_be_floor_2(
         f"=== TIN NHẮN MỚI TỪ {sender_name} ===\n{clean_q}"
     )
 
-    raw = await groq_chat(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.6,
-        max_tokens=650,
-        json_mode=True,
-    )
+    chat_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    raw: Optional[str] = None
+    if is_fact_check_request(user_message):
+        # Settling a debate needs facts: the larger model invents far fewer dates/credits than Qwen 27B
+        raw = await groq_chat(chat_messages, temperature=0.3, max_tokens=1000, json_mode=True, model=FALLBACK_MODEL)
+    if not raw:
+        raw = await groq_chat(chat_messages, temperature=0.6, max_tokens=900, json_mode=True)
 
     parsed = _parse_json_lenient(raw or "")
     if parsed and isinstance(parsed.get("reply"), str) and parsed["reply"].strip():
         sugs: List[Dict[str, str]] = []
-        raw_sugs = parsed.get("suggested_songs")
+        picked: List[Dict[str, Any]] = []
         mood = str(parsed.get("mood") or "").strip().lower()
+        if grounded and isinstance(parsed.get("picks"), list):
+            seen_idx = set()
+            for p in parsed["picks"][:5]:
+                try:
+                    idx = int(p) - 1
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < len(cands) and idx not in seen_idx:
+                    seen_idx.add(idx)
+                    picked.append(cands[idx])
+        if grounded:
+            # The cards must match what the reply text lists: models sometimes write a different song than
+            # the index they put in `picks`. Songs actually named in the reply win; picks fill any gap.
+            in_text = _match_candidates_in_text(str(parsed.get("reply") or ""), cands)
+            if in_text:
+                picked = in_text + [c for c in picked if c not in in_text]
+                picked = picked[: max(len(in_text), min(3, len(picked)))]
+        raw_sugs = parsed.get("suggested_songs")
         if isinstance(raw_sugs, list):
             for s in raw_sugs[:5]:
                 if isinstance(s, dict) and s.get("title"):
@@ -532,18 +1081,28 @@ async def chat_with_em_be_floor_2(
                         "artist": _strip_stray_cjk(str(s.get("artist", "")).strip())[:60],
                     })
         return {
-            "reply": _strip_stray_cjk(parsed["reply"].strip())[:900],
+            "reply": _tidy_reply(parsed["reply"]),
             "suggested_songs": sugs,
+            "picked_tracks": picked,
             "mood": mood if mood in MOOD_HIT_CATALOG else "",
         }
 
-    # Graceful fallback if JSON parsing failed but plain text exists
-    if raw and not raw.startswith("{"):
-        return {"reply": _strip_stray_cjk(raw.strip())[:900], "suggested_songs": []}
+    # Graceful fallback if JSON parsing failed but plain text exists (e.g. salvaged json_validate_failed text):
+    # recover the picks by locating candidate song titles mentioned in the reply, in order of appearance.
+    if raw and not raw.lstrip().startswith("{"):
+        picked = _match_candidates_in_text(raw, cands) if grounded else []
+        return {
+            "reply": _tidy_reply(raw),
+            "suggested_songs": [],
+            "picked_tracks": picked,
+            "mood": mood_hint if mood_hint in MOOD_HIT_CATALOG else "",
+        }
 
     return {
         "reply": f"Ủa {sender_name} ơi, tín hiệu của Em bé floor 2 vừa hơi chập chờn xíu 🥺 Bạn gọi lại mình sau vài giây nhé!",
         "suggested_songs": [],
+        "picked_tracks": [],
+        "mood": "",
     }
 
 
@@ -746,6 +1305,7 @@ def _fold(text: str) -> str:
     import unicodedata
     s = unicodedata.normalize("NFD", (text or "").lower()).replace("đ", "d")
     s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = re.sub(r"['’‘`´]", "", s)  # "Don't" / "Don’t" / "Dont" -> "dont"
     return re.sub(r"[^a-z0-9 ]+", " ", s)
 
 

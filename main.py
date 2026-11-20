@@ -28,7 +28,11 @@ from services.ai import (
     AI_BOT_ID,
     AI_BOT_NAME,
     analyze_room_vibe,
+    build_conversation_transcript,
     build_mc_context,
+    forget_conversation_digest,
+    get_conversation_digest,
+    schedule_conversation_digest,
     catalog_songs_for_mood,
     build_room_ai_context,
     chat_with_em_be_floor_2,
@@ -37,6 +41,9 @@ from services.ai import (
     get_ai_stats,
     get_or_create_mc_intro,
     is_ai_mention,
+    looks_like_music_request,
+    plan_music_request,
+    strip_ai_mention,
     mc_audio_cache,
 )
 from services.cache import TTLCache
@@ -758,6 +765,7 @@ def _evict_stale_rooms():
     ]
     for rid in stale_ids:
         rooms.pop(rid, None)
+        forget_conversation_digest(rid)
 
 
 # ============================================================================
@@ -1178,12 +1186,126 @@ async def _resolve_ai_song_suggestions(
     return resolved[:limit]
 
 
+async def _gather_chat_music_candidates(
+    room: "Room",
+    user_text: str,
+    exclude_ids: Set[str],
+) -> Tuple[List[Dict], str]:
+    """Live YouTube grounding for chat suggestions.
+
+    1. LLM planner -> mood/genre code + 2 search queries.
+    2. Parallel YouTube searches, keep only real single songs (no compilations / remix / shorts).
+    3. Expand with YouTube's related Mix of the most-viewed hit (same-genre popular songs).
+    """
+    recent_chat = build_conversation_transcript(room.messages, char_budget=900, exclude_last_text=user_text)["text"]
+    plan = await plan_music_request(user_text, recent_chat)
+    if not plan or not plan.get("is_music_request") or not plan.get("queries"):
+        return [], (plan or {}).get("mood", "")
+
+    prompt_norm = _normalize_vn_music_text(strip_ai_mention(user_text))
+    allow_long = _prompt_wants_long_mix(prompt_norm)
+    want_remix = _prompt_wants_remix_or_cover(prompt_norm)
+
+    def _views_num(h: Dict) -> float:
+        s = str(h.get("views") or "").replace("\xa0", " ").lower()
+        m = re.search(r"([\d.,]+)\s*(tr|n|k|m|b|tỷ)?", s)
+        if not m:
+            return 0.0
+        unit = m.group(2) or ""
+        raw_num = m.group(1)
+        if unit in ("m", "k", "b"):  # English format: 1.3M, 2,100
+            raw_num = raw_num.replace(",", "")
+        else:  # Vietnamese format: 1,3 Tr, 2.100
+            raw_num = raw_num.replace(".", "").replace(",", ".")
+        try:
+            num = float(raw_num)
+        except ValueError:
+            return 0.0
+        return num * {"tr": 1e6, "m": 1e6, "n": 1e3, "k": 1e3, "b": 1e9, "tỷ": 1e9}.get(unit, 1)
+
+    def _ok(h: Dict) -> bool:
+        if not _is_valid_music_track(h, allow_long_mix=allow_long, prompt_norm=prompt_norm):
+            return False
+        dur = int(h.get("duration") or 0)
+        if dur and dur > 480 and not allow_long:  # single songs rarely exceed 8 min
+            return False
+        t_norm = _normalize_vn_music_text(h.get("title", ""))
+        if not want_remix and any(
+            k in t_norm
+            for k in ("remix", "rmx", "karaoke", "sped up", "slowed", "nhac chuong", "cover", "reaction", "tong hop", "playlist")
+        ):
+            return False
+        # Prefer real hits: drop low-view uploads when YouTube reports a view count
+        if h.get("views") and _views_num(h) < 100_000:
+            return False
+        return True
+
+    # Genre-correct anchors: 2 random curated hits of the detected mood/genre. Their YouTube "related Mix"
+    # surfaces fresh popular songs of the SAME genre (better seeds than the most-viewed generic search hit).
+    anchors = catalog_songs_for_mood(plan.get("mood", ""))
+    random.shuffle(anchors)
+    anchor_queries = [f"{a['title']} {a['artist']} official mv" for a in anchors[:2]]
+
+    queries = plan["queries"][:2] + anchor_queries
+    search_results = await asyncio.gather(*(search_youtube(q, limit=8) for q in queries), return_exceptions=True)
+    hits: List[Dict] = []
+    seeds: List[Dict] = []
+    n_plan = len(plan["queries"][:2])
+    for i, res in enumerate(search_results):
+        if not isinstance(res, list):
+            continue
+        valid = [h for h in res if _ok(h)]
+        if i < n_plan:
+            hits.extend(valid)
+        elif valid:
+            seeds.append(valid[0])  # top hit of an anchor search = the anchor song itself
+
+
+    if not seeds and hits:
+        seeds = [max(hits, key=_views_num)]
+    hits.extend(seeds)
+    if seeds:
+        rel_lists = await asyncio.gather(
+            *(asyncio.wait_for(get_related_videos(s["id"], limit=14), timeout=5.0) for s in seeds[:2]),
+            return_exceptions=True,
+        )
+        # Interleave the related lists so both anchors contribute variety
+        rel_valid = [[r for r in rl if _ok(r)] for rl in rel_lists if isinstance(rl, list)]
+        for i in range(max((len(x) for x in rel_valid), default=0)):
+            for rl in rel_valid:
+                if i < len(rl):
+                    hits.append(rl[i])
+
+    candidates: List[Dict] = []
+    seen_ids: Set[str] = set(exclude_ids)
+    seen_titles: Set[str] = set()
+    for h in hits:
+        vid = h.get("id")
+        key = _normalize_vn_music_text(h.get("title", ""))[:40]
+        if not vid or vid in seen_ids or key in seen_titles:
+            continue
+        seen_ids.add(vid)
+        seen_titles.add(key)
+        candidates.append(dict(h))
+        if len(candidates) >= 16:
+            break
+    return candidates, plan.get("mood", "")
+
+
 async def _handle_ai_chat_reply(room: "Room", sender_name: str, user_text: str) -> None:
     """Background coroutine for '@Em bé floor 2' chat responses with full room & lyrics context."""
     try:
         await room.broadcast({"type": "ai_typing", "typing": True, "bot_name": AI_BOT_NAME})
         lyrics_excerpt = await get_room_lyrics_excerpt(room)
-        ctx = build_room_ai_context(room, current_lyrics_excerpt=lyrics_excerpt)
+        # Full conversation understanding: whole-session digest + verbatim latest messages
+        digest = await get_conversation_digest(room)
+        ctx = build_room_ai_context(
+            room,
+            current_lyrics_excerpt=lyrics_excerpt,
+            chat_char_budget=3500,
+            exclude_last_text=user_text,
+            conversation_digest=digest,
+        )
 
         # Songs already in the room or recently suggested by the bot -> never suggest them again
         exclude_ids: Set[str] = set()
@@ -1200,17 +1322,44 @@ async def _handle_ai_chat_reply(room: "Room", sender_name: str, user_text: str) 
                     avoid_titles.append(str(st["title"])[:70])
         avoid_titles = list(dict.fromkeys(avoid_titles))
 
-        ai_out = await chat_with_em_be_floor_2(ctx, sender_name, user_text, avoid_titles=avoid_titles)
+        # Hybrid grounding: live YouTube search first (always fresh trending), curated catalog only as fallback
+        yt_candidates: List[Dict] = []
+        mood_hint = ""
+        if looks_like_music_request(user_text):
+            try:
+                yt_candidates, mood_hint = await asyncio.wait_for(
+                    _gather_chat_music_candidates(room, user_text, exclude_ids), timeout=9.0
+                )
+            except Exception as exc:
+                print(f"[ai chat candidates] fallback to catalog: {type(exc).__name__} {exc}")
+                yt_candidates = []
+        grounded = len(yt_candidates) >= 4
+
+        ai_out = await chat_with_em_be_floor_2(
+            ctx,
+            sender_name,
+            user_text,
+            youtube_candidates=yt_candidates if grounded else None,
+            avoid_titles=avoid_titles,
+            mood_hint=mood_hint,
+        )
         reply_text = (ai_out.get("reply") or "").strip()
         if not reply_text:
             return
 
         raw_songs = list(ai_out.get("suggested_songs") or [])
-        mood = ai_out.get("mood") or ""
-        suggested_tracks = await _resolve_ai_song_suggestions(raw_songs, exclude_ids=exclude_ids, limit=3)
+        mood = ai_out.get("mood") or mood_hint
+        if grounded:
+            suggested_tracks = [dict(t) for t in (ai_out.get("picked_tracks") or []) if t.get("id") not in exclude_ids][:3]
+            if not suggested_tracks and raw_songs:
+                suggested_tracks = await _resolve_ai_song_suggestions(
+                    raw_songs, exclude_ids=exclude_ids, limit=3, prefetched_candidates=yt_candidates
+                )
+        else:
+            suggested_tracks = await _resolve_ai_song_suggestions(raw_songs, exclude_ids=exclude_ids, limit=3)
 
-        # Backfill with verified mood-matched trending hits if some LLM picks were unplayable / repeats
-        if mood and len(suggested_tracks) < 3:
+        # Catalog path only: backfill with verified mood-matched hits if some LLM picks were unplayable / repeats
+        if not grounded and mood and len(suggested_tracks) < 3:
             asked = {_normalize_vn_music_text(s.get("title", "")) for s in raw_songs}
             pool = [
                 s for s in catalog_songs_for_mood(mood)
@@ -2335,6 +2484,8 @@ async def websocket_room_endpoint(
                     db.schedule_add_message(room.id, msg)
 
                 await room.broadcast({"type": "chat", "message": msg})
+                # Keep the bot's whole-conversation digest fresh in the background (debounced, non-blocking)
+                schedule_conversation_digest(room)
 
                 # Trigger "@Em bé floor 2" conversational AI reply when tagged in chat!
                 if text and is_ai_mention(text):
