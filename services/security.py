@@ -19,6 +19,7 @@ ALLOWED_REACTIONS = {"❤️", "🔥", "🎵", "👏", "🕺", "🍻", "🚀", "
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 GIPHY_ID_RE = re.compile(r"^[A-Za-z0-9]{8,28}$")
+LOCAL_STICKER_ID_RE = re.compile(r"^local:([a-z0-9_]{1,64}\.gif)$")
 MEDIA_ID_RE = re.compile(r"^[a-f0-9]{16,32}$")
 
 PBKDF2_ITERATIONS = 120_000
@@ -28,6 +29,15 @@ def sanitize_giphy_id(value: Optional[str]) -> Optional[str]:
     """Allow only strict alphanumeric Giphy IDs to prevent URL injection/XSS."""
     if isinstance(value, str) and GIPHY_ID_RE.match(value.strip()):
         return value.strip()
+    return None
+
+
+def sanitize_local_sticker_id(value: Optional[str]) -> Optional[str]:
+    """Allow only strict local Bé Floor 2 GIF IDs ('local:<safe_name>.gif'), returning the safe filename."""
+    if isinstance(value, str):
+        m = LOCAL_STICKER_ID_RE.match(value.strip())
+        if m:
+            return m.group(1)
     return None
 
 
@@ -175,6 +185,8 @@ class Session:
     user_id: str
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
+    # Stable, device-derived id for long-term AI memory (survives server restarts unlike user_id)
+    profile_id: str = ""
 
 
 class SessionManager:

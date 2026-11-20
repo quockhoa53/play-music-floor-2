@@ -720,3 +720,179 @@ async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, A
             if vid:
                 yt_info_cache.set(vid, it)
     return items[:limit]
+
+
+# ============================================================================
+# REAL-TIME TRENDING MUSIC (YouTube Music charts, Vietnam)
+# ============================================================================
+YTM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Origin": "https://music.youtube.com",
+    "Referer": "https://music.youtube.com/",
+    "Content-Type": "application/json",
+}
+YTM_CONTEXT = {"client": {"clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "vi", "gl": "VN"}}
+# Known chart playlists (used only if chart discovery fails): trending VN + daily top music videos VN
+_FALLBACK_CHART_BROWSE_IDS = ("VLOLAK5uy_lEos0zuYBvGC9C0FSGG3pZ6gO4a82P6zg", "VLPL4fGSI1pDJn57DkisEwlIpcs9FAt5yudJ")
+TRENDING_TTL_SEC = 3 * 3600
+
+_trending_cache: Dict[str, Any] = {"items": [], "ts": 0.0}
+_trending_inflight: Optional[asyncio.Task] = None
+
+
+def _ytm_runs_text(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    return "".join(r.get("text", "") for r in obj.get("runs", []) if isinstance(r, dict))
+
+
+async def _ytm_browse(browse_id: str, **extra: Any) -> Optional[Dict[str, Any]]:
+    client = _get_http_client()
+    try:
+        resp = await client.post(
+            "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false",
+            json={"context": YTM_CONTEXT, "browseId": browse_id, **extra},
+            headers=YTM_HEADERS,
+            timeout=httpx.Timeout(8.0, connect=4.0),
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        print(f"[yt trending] browse {browse_id}: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"[yt trending] browse {browse_id}: {type(e).__name__} {e}")
+    return None
+
+
+def _discover_chart_playlists(charts_json: Dict[str, Any]) -> List[Tuple[int, str]]:
+    """Find chart playlist browseIds on the charts page, ranked: trending first, then daily top videos."""
+    found: List[Tuple[int, str]] = []
+
+    def _walk(o: Any) -> None:
+        if isinstance(o, dict):
+            r = o.get("musicTwoRowItemRenderer")
+            if isinstance(r, dict):
+                title = _ytm_runs_text(r.get("title")).lower()
+                bid = ((r.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId", "")
+                if bid.startswith("VL"):
+                    if "thịnh hành" in title or "trending" in title:
+                        found.append((0, bid))
+                    elif "trong ngày" in title or "daily" in title:
+                        found.append((1, bid))
+                    elif "hàng đầu" in title or "top" in title:
+                        found.append((2, bid))
+            for v in o.values():
+                _walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                _walk(x)
+
+    _walk(charts_json)
+    found.sort()
+    return found
+
+
+def _parse_chart_playlist(pl_json: Dict[str, Any], tag: str) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+
+    def _walk(o: Any) -> None:
+        if isinstance(o, dict):
+            r = o.get("musicResponsiveListItemRenderer")
+            if isinstance(r, dict):
+                vid = ((r.get("playlistItemData") or {}).get("videoId")) or ""
+                cols = r.get("flexColumns") or []
+
+                def _col(i: int) -> str:
+                    try:
+                        return _ytm_runs_text(cols[i]["musicResponsiveListItemFlexColumnRenderer"]["text"])
+                    except Exception:
+                        return ""
+
+                dur_str = ""
+                try:
+                    dur_str = r["fixedColumns"][0]["musicResponsiveListItemFixedColumnRenderer"]["text"]["runs"][0]["text"]
+                except Exception:
+                    pass
+                title, artist = _col(0).strip(), _col(1).strip()
+                if vid and re.match(r"^[a-zA-Z0-9_-]{11}$", vid) and title:
+                    secs = parse_duration_str(dur_str)
+                    items.append({
+                        "id": vid,
+                        "title": title[:160],
+                        "author": (artist.split(" • ")[0] or "YouTube")[:80],
+                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                        "duration": secs,
+                        "duration_str": dur_str or format_duration(secs),
+                        "tag": tag,
+                    })
+            for v in o.values():
+                _walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                _walk(x)
+
+    _walk(pl_json)
+    return items
+
+
+async def _fetch_trending_music() -> List[Dict[str, Any]]:
+    charts = await _ytm_browse("FEmusic_charts", formData={"selectedValues": ["VN"]})
+    ranked = _discover_chart_playlists(charts) if charts else []
+    browse_ids: List[str] = []
+    for _, bid in ranked:
+        if bid not in browse_ids:
+            browse_ids.append(bid)
+    for bid in _FALLBACK_CHART_BROWSE_IDS:
+        if bid not in browse_ids:
+            browse_ids.append(bid)
+
+    tags = ["Đang thịnh hành", "Top hôm nay"]
+    results = await asyncio.gather(*(_ytm_browse(bid) for bid in browse_ids[:2]), return_exceptions=True)
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for i, res in enumerate(results):
+        if not isinstance(res, dict):
+            continue
+        for it in _parse_chart_playlist(res, tags[min(i, len(tags) - 1)]):
+            if it["id"] in seen:
+                continue
+            # Skip non-song uploads (mashups, compilations) and odd lengths
+            low = it["title"].lower()
+            if any(k in low for k in ("mashup", "liên khúc", "playlist", "tổng hợp")):
+                continue
+            if it["duration"] and (it["duration"] < 90 or it["duration"] > 600):
+                continue
+            seen.add(it["id"])
+            merged.append(it)
+    for it in merged:
+        yt_info_cache.set(it["id"], it)
+    return merged
+
+
+async def get_trending_music(limit: int = 30) -> List[Dict[str, Any]]:
+    """Real-time trending music in Vietnam (YouTube Music charts), cached for a few hours.
+
+    Returns [] only if YouTube is unreachable AND nothing was ever cached.
+    """
+    global _trending_inflight
+    now = time.time()
+    if _trending_cache["items"] and now - _trending_cache["ts"] < TRENDING_TTL_SEC:
+        return _trending_cache["items"][:limit]
+
+    if _trending_inflight is None or _trending_inflight.done():
+        _trending_inflight = asyncio.create_task(_fetch_trending_music())
+    try:
+        items = await asyncio.wait_for(asyncio.shield(_trending_inflight), timeout=10.0)
+    except Exception:
+        items = []
+    if items:
+        _trending_cache["items"] = items
+        _trending_cache["ts"] = now
+        return items[:limit]
+    # Serve stale charts rather than nothing; retry sooner next time
+    if _trending_cache["items"]:
+        _trending_cache["ts"] = now - TRENDING_TTL_SEC + 300
+    return _trending_cache["items"][:limit]
+
+
+def get_cached_trending_music(limit: int = 30) -> List[Dict[str, Any]]:
+    return list(_trending_cache["items"][:limit])

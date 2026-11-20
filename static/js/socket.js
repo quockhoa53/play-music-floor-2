@@ -69,6 +69,7 @@ class RoomSocket {
         this.ws.onopen = () => {
             this.isConnected = true;
             this.reconnectAttempts = 0;
+            this.startHeartbeat();
             this.trigger('connected');
 
             this.send('join', {
@@ -92,6 +93,7 @@ class RoomSocket {
 
         this.ws.onclose = (event) => {
             this.isConnected = false;
+            this.stopHeartbeat();
             this.trigger('disconnected', event);
 
             if (this.manualClose) return;
@@ -184,6 +186,10 @@ class RoomSocket {
         this.send('reaction', { emoji });
     }
 
+    setLyricsOffset(videoId, offset) {
+        this.send('lyrics_offset', { video_id: videoId, offset });
+    }
+
     addTrack(track) {
         this.send('add_track', { track });
     }
@@ -232,10 +238,44 @@ class RoomSocket {
         this.send('toggle_mc_mode');
     }
 
+    // Keep-alive: proxies (Render) cut idle sockets, and background tabs send nothing for a long time
+    startHeartbeat() {
+        this.stopHeartbeat();
+        this.heartbeatTimer = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try { this.ws.send(JSON.stringify({ action: 'ping' })); } catch (_) {}
+            }
+        }, 25000);
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+    }
+
+    /** Back on the tab (or network): reconnect right away instead of waiting for the backoff timer. */
+    ensureConnected() {
+        if (this.manualClose || !this.roomId || !this.sessionToken) return;
+        const state = this.ws ? this.ws.readyState : WebSocket.CLOSED;
+        if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+        this.reconnectAttempts = 0;
+        this.scheduleReconnect();
+    }
+
+    /**
+     * Leave on purpose (Rời phòng button / closing the tab): tell the server first so it removes us
+     * immediately. A connection that merely DROPS keeps us in the room for a grace period instead.
+     */
     disconnect() {
         this.manualClose = true;
+        this.stopHeartbeat();
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.ws) {
+            try {
+                if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ action: 'leave' }));
+            } catch (e) {}
             try { this.ws.close(1000, 'Client left room'); } catch (e) {}
         }
         this.isConnected = false;
@@ -243,3 +283,19 @@ class RoomSocket {
 }
 
 window.roomSocket = new RoomSocket();
+
+// Switching tabs must NOT count as leaving: only reconnect when we come back.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') window.roomSocket.ensureConnected();
+});
+window.addEventListener('online', () => window.roomSocket.ensureConnected());
+window.addEventListener('focus', () => window.roomSocket.ensureConnected());
+
+// Closing the tab / navigating away (not bfcache) = really leaving the room
+window.addEventListener('pagehide', (event) => {
+    if (event.persisted) return;
+    const s = window.roomSocket;
+    if (s && s.ws && s.ws.readyState === WebSocket.OPEN && !s.manualClose) {
+        try { s.ws.send(JSON.stringify({ action: 'leave' })); } catch (_) {}
+    }
+});

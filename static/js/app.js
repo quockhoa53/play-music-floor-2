@@ -51,11 +51,31 @@ function safeThumbUrl(videoId) {
     return 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&q=80';
 }
 
+// Random secret identifying this browser for Em bé floor 2's long-term memory (taste, things you told it).
+// Only a salted hash ever leaves the server side; clearing site data = a fresh, memory-less profile.
+function getDeviceKey() {
+    const KEY = 'floor2_device_key';
+    try {
+        let k = localStorage.getItem(KEY);
+        if (!k || !/^[A-Za-z0-9_-]{24,128}$/.test(k)) {
+            const bytes = new Uint8Array(24);
+            crypto.getRandomValues(bytes);
+            k = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            localStorage.setItem(KEY, k);
+        }
+        return k;
+    } catch (_) {
+        return '';
+    }
+}
+
 async function ensureSession(forceNew = false, verifyServer = false) {
     if (!forceNew && !verifyServer && window.appState.sessionToken && window.appState.userId) {
         return window.appState.sessionToken;
     }
     const headers = { 'Content-Type': 'application/json' };
+    const deviceKey = getDeviceKey();
+    if (deviceKey) headers['X-Device-Key'] = deviceKey;
     if (!forceNew && window.appState.sessionToken) {
         headers['X-Session-Token'] = window.appState.sessionToken;
     }
@@ -792,7 +812,8 @@ function leaveRoom() {
     window.appState.inviteToken = null;
     window.appState.roomData = null;
     window.appState.roomSuggestions = null;
-    window.appState.roomSuggestionsMode = 'curated';
+    window.appState.roomSuggestionsMode = 'trending';
+    window.appState.roomSuggestionMembers = [];
     renderPriorityBanner(null);
     resetRelatedSuggestions();
     resetLyricsState();
@@ -867,11 +888,10 @@ function initRealtimeSearch() {
         if (!list) return;
 
         const hasPersonalized = Array.isArray(window.appState.roomSuggestions) && window.appState.roomSuggestions.length > 0;
-        const mode = window.appState.roomSuggestionsMode || 'curated';
         if (header) {
-            header.textContent = (hasPersonalized && mode === 'room_history')
-                ? '✨ Gợi ý đa dạng theo lịch sử nghe của phòng — Gõ để tìm tức thì'
-                : 'Gợi ý nhanh đa thể loại — Gõ tên bài hoặc dán link YouTube để tìm tức thì';
+            header.textContent = hasPersonalized
+                ? quickSuggestionsHeaderText()
+                : '🔥 Đang thịnh hành tại Việt Nam — Gõ tên bài hoặc dán link YouTube để tìm';
         }
 
         searchState.results = hasPersonalized ? window.appState.roomSuggestions : (window.appState.suggestions || []);
@@ -883,9 +903,7 @@ function initRealtimeSearch() {
             loadRoomQuickSuggestions(window.appState.roomId).then((updated) => {
                 if (updated && searchState.isOpen && !input.value.trim()) {
                     const hdr = document.getElementById('search-dropdown-header');
-                    if (hdr && window.appState.roomSuggestionsMode === 'room_history') {
-                        hdr.textContent = '✨ Gợi ý đa dạng theo lịch sử nghe của phòng — Gõ để tìm tức thì';
-                    }
+                    if (hdr) hdr.textContent = quickSuggestionsHeaderText();
                     searchState.results = window.appState.roomSuggestions || window.appState.suggestions || [];
                     renderSearchResultsList(searchState.results);
                 }
@@ -1368,6 +1386,24 @@ function initSocketEvents() {
         if (data.message) window.roomChat.addMessage(data.message);
     });
 
+    socket.on('ai_proactive_changed', (data) => {
+        if (window.appState.roomData) {
+            window.appState.roomData.ai_proactive = !!data.ai_proactive;
+            updateAiProactiveToggleUI();
+        }
+        if (data.message) window.roomChat.addMessage(data.message);
+    });
+
+    // Host calibrated the lyrics sync for the current video -> applies to everyone instantly
+    socket.on('lyrics_offset', (data) => {
+        if (!data || !data.video_id) return;
+        const ct = window.appState.roomData && window.appState.roomData.current_track;
+        if (ct && ct.id === data.video_id) ct.lyrics_offset = Number(data.offset) || 0;
+        if (lyricsState.lastVideoId === data.video_id) {
+            setSharedLyricsOffset(Number(data.offset) || 0);
+        }
+    });
+
     socket.on('mc_mode_changed', (data) => {
         if (window.appState.roomData) {
             window.appState.roomData.mc_enabled = !!data.mc_enabled;
@@ -1393,7 +1429,14 @@ function initSocketEvents() {
 
     socket.on('ai_typing', (data) => {
         if (window.roomChat && typeof window.roomChat.setAiTyping === 'function') {
-            window.roomChat.setAiTyping(!!data.typing, data.bot_name || 'Em bé floor 2');
+            window.roomChat.setAiTyping(!!data.typing, data.bot_name || 'Em bé floor 2', data.status || '');
+        }
+    });
+
+    // Live token streaming of Em bé floor 2's reply (final 'chat' message with the same id replaces it)
+    socket.on('ai_stream', (data) => {
+        if (window.roomChat && typeof window.roomChat.upsertAiStream === 'function' && data && data.stream_id) {
+            window.roomChat.upsertAiStream(data.stream_id, data.text || '', data);
         }
     });
 
@@ -1641,6 +1684,10 @@ function formatTotalMinutes(totalSec) {
 }
 
 function renderQueue() {
+    // Keep "+ Thêm" buttons on Em bé floor 2's song cards in sync with what is actually playing / queued
+    if (window.roomChat && typeof window.roomChat.refreshAiTrackButtons === 'function') {
+        window.roomChat.refreshAiTrackButtons();
+    }
     const queueList = document.getElementById('playlist-queue-list');
     const queueCountBadge = document.getElementById('queue-count-badge');
     const queueDurationBadge = document.getElementById('queue-duration-badge');
@@ -2306,14 +2353,27 @@ function initChatRichMedia() {
     gifPopover?.addEventListener('click', (e) => e.stopPropagation());
 
     const highlightTagChips = (selector, activeQuery) => {
+        const normActive = (activeQuery || '').trim().toLowerCase();
         document.querySelectorAll(selector).forEach(tag => {
-            const isMatch = (tag.getAttribute('data-q') || '') === activeQuery;
+            const isMatch = (tag.getAttribute('data-q') || '').trim().toLowerCase() === normActive;
             tag.classList.toggle('bg-indigo-500/20', isMatch);
             tag.classList.toggle('text-indigo-600', isMatch);
             tag.classList.toggle('dark:text-indigo-300', isMatch);
             tag.classList.toggle('ring-1', isMatch);
             tag.classList.toggle('ring-indigo-500/40', isMatch);
         });
+    };
+
+    const resolveMediaItemPreview = (item) => {
+        const id = item && typeof item.id === 'string' ? item.id : '';
+        const localMatch = /^local:([a-z0-9_]{1,64}\.gif)$/.exec(id);
+        if (localMatch) {
+            return { id, src: `/images/stickers/${localMatch[1]}`, isLocal: true };
+        }
+        if (/^[A-Za-z0-9]{8,28}$/.test(id)) {
+            return { id, src: `https://media.giphy.com/media/${id}/200w.gif`, isLocal: false };
+        }
+        return null;
     };
 
     // 1. ANIMATED STICKER (NHÃN DÁN) PICKER (Curated + Live Search with Client Cache)
@@ -2332,13 +2392,20 @@ function initChatRichMedia() {
             return;
         }
         stickers.forEach(st => {
-            if (!/^[A-Za-z0-9]{8,28}$/.test(st.id || '')) return;
+            const resolved = resolveMediaItemPreview(st);
+            if (!resolved) return;
             const card = document.createElement('button');
             card.type = 'button';
+            card.title = st.title || 'Nhãn dán';
             card.className = 'relative h-20 p-1.5 rounded-xl overflow-hidden surface-subtle hover:border-indigo-500 transition group flex items-center justify-center';
-            card.innerHTML = `<img src="https://media.giphy.com/media/${st.id}/200w.gif" alt="Nhãn dán" loading="lazy" class="w-full h-full object-contain group-hover:scale-110 transition-transform duration-200">`;
+            const img = document.createElement('img');
+            img.src = resolved.src;
+            img.alt = st.title || 'Nhãn dán';
+            img.loading = 'lazy';
+            img.className = 'w-full h-full object-contain group-hover:scale-110 transition-transform duration-200';
+            card.appendChild(img);
             card.onclick = () => {
-                window.roomSocket.sendSticker(st.id);
+                window.roomSocket.sendSticker(resolved.id);
                 closeAllPopovers();
             };
             stickerGrid.appendChild(card);
@@ -2434,14 +2501,30 @@ function initChatRichMedia() {
             gifGrid.innerHTML = `<div class="col-span-2 text-center py-6 text-xs text-dim">Không tìm thấy GIF phù hợp</div>`;
             return;
         }
+        const isLocalPack = gifs.some(g => typeof g.id === 'string' && g.id.startsWith('local:'));
+        gifGrid.classList.toggle('grid-cols-3', isLocalPack);
+        gifGrid.classList.toggle('grid-cols-2', !isLocalPack);
+
         gifs.forEach(gif => {
-            if (!/^[A-Za-z0-9]{8,28}$/.test(gif.id || '')) return;
+            const resolved = resolveMediaItemPreview(gif);
+            if (!resolved) return;
             const card = document.createElement('button');
             card.type = 'button';
-            card.className = 'relative h-24 rounded-xl overflow-hidden bg-slate-900/50 border border-theme hover:border-indigo-500 transition group';
-            card.innerHTML = `<img src="https://media.giphy.com/media/${gif.id}/200w.gif" alt="GIF" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200">`;
+            card.title = gif.title || 'GIF';
+            const img = document.createElement('img');
+            img.src = resolved.src;
+            img.alt = gif.title || 'GIF';
+            img.loading = 'lazy';
+            if (resolved.isLocal) {
+                card.className = 'relative h-24 p-1.5 rounded-xl overflow-hidden surface-subtle border border-theme hover:border-indigo-500 transition group flex items-center justify-center';
+                img.className = 'w-full h-full object-contain group-hover:scale-105 transition-transform duration-200';
+            } else {
+                card.className = 'relative h-24 rounded-xl overflow-hidden bg-slate-900/50 border border-theme hover:border-indigo-500 transition group';
+                img.className = 'w-full h-full object-cover group-hover:scale-105 transition-transform duration-200';
+            }
+            card.appendChild(img);
             card.onclick = () => {
-                window.roomSocket.sendGif(gif.id);
+                window.roomSocket.sendGif(resolved.id);
                 closeAllPopovers();
             };
             gifGrid.appendChild(card);
@@ -2598,7 +2681,7 @@ function initLightbox() {
 // =============================================================================
 // QUICK SUGGESTIONS & DYNAMIC RELATED SONGS STRIP (10 ITEMS, DRAG + WHEEL + ARROWS)
 // =============================================================================
-const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v3';
+const SUGGESTIONS_CACHE_KEY = 'floor2_suggestions_v4';
 const SUGGESTIONS_CACHE_TTL_MS = 5 * 60 * 1000;
 const RELATED_STORAGE_KEY = 'floor2_related_cache_v1';
 const RELATED_STORAGE_MAX = 30;
@@ -2610,12 +2693,34 @@ const roomQuickSugState = {
     fetchingSig: '',
 };
 
+// Chips to show when the current track has no related songs (or none is playing):
+// the room's member-taste suggestions first, then real-time trending — never a stale hardcoded list.
+function getFallbackSuggestionItems() {
+    const roomItems = window.appState.roomId ? window.appState.roomSuggestions : null;
+    if (Array.isArray(roomItems) && roomItems.length > 0) return roomItems;
+    return window.appState.suggestions || [];
+}
+
+function quickSuggestionsHeaderText() {
+    const mode = window.appState.roomSuggestionsMode || 'trending';
+    const members = window.appState.roomSuggestionMembers || [];
+    if (mode === 'members_history' && members.length) {
+        const shown = members.slice(0, 3).join(', ') + (members.length > 3 ? '…' : '');
+        return `✨ Gợi ý theo gu của ${shown} — Gõ để tìm tức thì`;
+    }
+    if (mode === 'room_history') return '✨ Gợi ý theo lịch sử nghe của phòng — Gõ để tìm tức thì';
+    return '🔥 Đang thịnh hành tại Việt Nam — Gõ tên bài hoặc dán link YouTube để tìm';
+}
+
 async function loadRoomQuickSuggestions(roomId) {
     if (!roomId) return false;
     const rd = window.appState.roomData;
     const histTail = ((rd && rd.history) || []).slice(-4).map(t => t.id).join(',');
     const curId = (rd && rd.current_track && rd.current_track.id) || '';
-    const sig = `${roomId}|${curId}|${histTail}`;
+    // Suggestions follow the ONLINE members' tastes, so a join/leave must refresh them too
+    const memberSig = ((rd && rd.users) || []).map(u => u.user_id || u.id || u.name).sort().join(',');
+    const queueSig = ((rd && rd.queue) || []).length;
+    const sig = `${roomId}|${curId}|${histTail}|${memberSig}|${queueSig}`;
 
     if (roomQuickSugState.lastSig === sig && Array.isArray(window.appState.roomSuggestions)) {
         return false;
@@ -2636,7 +2741,8 @@ async function loadRoomQuickSuggestions(roomId) {
         const items = Array.isArray(data.suggestions) ? data.suggestions : [];
         if (items.length > 0 && window.appState.roomId === roomId) {
             window.appState.roomSuggestions = items;
-            window.appState.roomSuggestionsMode = data.mode || 'curated';
+            window.appState.roomSuggestionsMode = data.mode || 'trending';
+            window.appState.roomSuggestionMembers = Array.isArray(data.seed_members) ? data.seed_members : [];
             roomQuickSugState.lastSig = sig;
             // Also refresh idle quick-add chips strip if no track is playing
             if (!relatedSuggestionsState.currentItems) {
@@ -2836,7 +2942,7 @@ function resetRelatedSuggestions() {
     }
     relatedSuggestionsState.lastVideoId = null;
     relatedSuggestionsState.currentItems = null;
-    renderQuickSuggestionChips(window.appState.suggestions || [], false);
+    renderQuickSuggestionChips(getFallbackSuggestionItems(), false);
 }
 
 function renderQuickSuggestionSkeletons() {
@@ -2941,7 +3047,7 @@ function refreshVisibleSuggestionChips() {
     if (relatedSuggestionsState.currentItems && relatedSuggestionsState.currentItems.length > 0) {
         renderQuickSuggestionChips(relatedSuggestionsState.currentItems, true);
     } else {
-        renderQuickSuggestionChips(window.appState.suggestions || [], false);
+        renderQuickSuggestionChips(getFallbackSuggestionItems(), false);
     }
 }
 
@@ -3019,12 +3125,12 @@ async function loadRelatedSuggestionsForTrack(track, preloadedItems = null) {
             renderQuickSuggestionChips(items, true);
         } else {
             relatedSuggestionsState.currentItems = null;
-            renderQuickSuggestionChips(window.appState.suggestions || [], false);
+            renderQuickSuggestionChips(getFallbackSuggestionItems(), false);
         }
     } catch (err) {
         if (err.name === 'AbortError') return;
         relatedSuggestionsState.currentItems = null;
-        renderQuickSuggestionChips(window.appState.suggestions || [], false);
+        renderQuickSuggestionChips(getFallbackSuggestionItems(), false);
     } finally {
         if (relatedSuggestionsState.abortController === controller) {
             relatedSuggestionsState.abortController = null;
@@ -3069,7 +3175,10 @@ async function initQuickSuggestions() {
 // =============================================================================
 // SYNCED LYRICS ENGINE (KARAOKE-STYLE REALTIME HIGHLIGHT & SEEK ON CLICK)
 // =============================================================================
-const LYRICS_OFFSETS_STORAGE_KEY = 'floor2_lyrics_offsets_v1';
+// v2: values are now PERSONAL adjustments on top of the room's shared calibration
+const LYRICS_OFFSETS_STORAGE_KEY = 'floor2_lyrics_offsets_v2';
+// Bump to bypass browser-cached /api/lyrics responses from the old (unaligned) engine
+const LYRICS_API_VERSION = '3';
 
 const lyricsState = {
     cache: new Map(), // videoId -> { ts, data }
@@ -3078,7 +3187,11 @@ const lyricsState = {
     plainLines: [],
     synced: false,
     activeIndex: -1,
-    offsetSec: 0,
+    offsetSec: 0,        // effective = sharedOffset + personalOffset
+    sharedOffset: 0,     // room-wide calibration for this video (set by Host, stored on server)
+    personalOffset: 0,   // this device only (e.g. Bluetooth latency), stored in localStorage
+    shareTimer: null,
+    syncConfidence: '',
     abortController: null,
     userScrollPauseUntil: 0,
     controlsBound: false,
@@ -3115,10 +3228,47 @@ function saveLyricsOffset(vid, val) {
 }
 
 function updateLyricsOffsetUI() {
+    lyricsState.offsetSec = Math.round((lyricsState.sharedOffset + lyricsState.personalOffset) * 10) / 10;
     const valEl = document.getElementById('lyrics-offset-value');
     if (valEl) {
         const v = lyricsState.offsetSec;
         valEl.textContent = v === 0 ? '0s' : `${v > 0 ? '+' : ''}${v.toFixed(1)}s`;
+        const fmt = (x) => `${x > 0 ? '+' : ''}${x.toFixed(1)}s`;
+        valEl.title = window.appState.isHost
+            ? `Chỉnh lệch cho CẢ PHÒNG (lưu cho video này, lần sau tự áp dụng). Hiện tại: ${fmt(lyricsState.sharedOffset)}. Bấm để đặt lại 0.`
+            : `Phòng: ${fmt(lyricsState.sharedOffset)} · Riêng máy bạn: ${fmt(lyricsState.personalOffset)}. Bấm để bỏ chỉnh riêng.`;
+    }
+}
+
+function refreshLyricsAfterOffsetChange() {
+    updateLyricsOffsetUI();
+    if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
+}
+
+function setSharedLyricsOffset(val) {
+    lyricsState.sharedOffset = Math.max(-90, Math.min(90, Math.round((Number(val) || 0) * 10) / 10));
+    refreshLyricsAfterOffsetChange();
+}
+window.setSharedLyricsOffset = setSharedLyricsOffset;
+
+function adjustLyricsOffset(delta, reset = false) {
+    const vid = lyricsState.lastVideoId;
+    if (!vid) return;
+    if (window.appState.isHost) {
+        // Host calibrates for the whole room; debounce so rapid clicks send one update
+        lyricsState.sharedOffset = reset ? 0 : Math.max(-90, Math.min(90, Math.round((lyricsState.sharedOffset + delta) * 10) / 10));
+        refreshLyricsAfterOffsetChange();
+        clearTimeout(lyricsState.shareTimer);
+        const value = lyricsState.sharedOffset;
+        lyricsState.shareTimer = setTimeout(() => {
+            if (window.roomSocket && typeof window.roomSocket.setLyricsOffset === 'function') {
+                window.roomSocket.setLyricsOffset(vid, value);
+            }
+        }, 450);
+    } else {
+        lyricsState.personalOffset = reset ? 0 : Math.max(-90, Math.min(90, Math.round((lyricsState.personalOffset + delta) * 10) / 10));
+        saveLyricsOffset(vid, lyricsState.personalOffset);
+        refreshLyricsAfterOffsetChange();
     }
 }
 
@@ -3136,26 +3286,15 @@ function initLyricsControls() {
     }
 
     document.getElementById('btn-lyrics-offset-minus')?.addEventListener('click', (e) => {
-        const step = e.shiftKey ? 2.0 : 0.5;
-        lyricsState.offsetSec = Math.max(-90, Math.round((lyricsState.offsetSec - step) * 10) / 10);
-        saveLyricsOffset(lyricsState.lastVideoId, lyricsState.offsetSec);
-        updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
+        adjustLyricsOffset(-(e.shiftKey ? 2.0 : 0.5));
     });
 
     document.getElementById('btn-lyrics-offset-plus')?.addEventListener('click', (e) => {
-        const step = e.shiftKey ? 2.0 : 0.5;
-        lyricsState.offsetSec = Math.min(90, Math.round((lyricsState.offsetSec + step) * 10) / 10);
-        saveLyricsOffset(lyricsState.lastVideoId, lyricsState.offsetSec);
-        updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
+        adjustLyricsOffset(e.shiftKey ? 2.0 : 0.5);
     });
 
     document.getElementById('lyrics-offset-value')?.addEventListener('click', () => {
-        lyricsState.offsetSec = 0;
-        saveLyricsOffset(lyricsState.lastVideoId, 0);
-        updateLyricsOffsetUI();
-        if (window.syncPlayer) window.updateLyricsHighlight(window.syncPlayer.getSmoothCurrentTime(), true);
+        adjustLyricsOffset(0, true);
     });
 }
 
@@ -3169,7 +3308,10 @@ function resetLyricsState() {
     lyricsState.plainLines = [];
     lyricsState.synced = false;
     lyricsState.activeIndex = -1;
-    lyricsState.offsetSec = 0;
+    lyricsState.sharedOffset = 0;
+    lyricsState.personalOffset = 0;
+    lyricsState.syncConfidence = '';
+    clearTimeout(lyricsState.shareTimer);
     updateLyricsOffsetUI();
 
     const badge = document.getElementById('lyrics-sync-badge');
@@ -3200,11 +3342,23 @@ function renderLyricsData(data) {
     lyricsState.synced = lyricsState.lines.length > 0;
 
     if (lyricsState.synced) {
+        lyricsState.syncConfidence = (data && data.sync_confidence) || '';
         if (badge) {
             const autoOff = Number(data && data.auto_offset) || 0;
             const src = (data && data.source) || '';
+            const calibrated = Math.abs(lyricsState.sharedOffset) >= 0.05;
             badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/35 text-[10px] font-bold text-emerald-200';
-            if (Math.abs(autoOff) >= 0.35) {
+            if (calibrated) {
+                badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đã hiệu chỉnh`;
+                badge.title = 'Chủ phòng đã căn chỉnh lời cho video này — áp dụng cho mọi người';
+            } else if (lyricsState.syncConfidence === 'low') {
+                // No caption track & no same-length lyric version: timing may drift with MV intros
+                badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-[10px] font-bold text-amber-200';
+                badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Có thể lệch`;
+                badge.title = window.appState.isHost
+                    ? 'Video này khác bản thu gốc nên lời có thể lệch. Dùng nút −/+ để chỉnh 1 lần, cả phòng và các lần phát sau đều được áp dụng.'
+                    : 'Video này khác bản thu gốc nên lời có thể lệch. Chủ phòng có thể chỉnh lệch cho cả phòng bằng nút −/+.';
+            } else if (Math.abs(autoOff) >= 0.35) {
                 badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Đã khớp MV`;
                 badge.title = `Tự động căn khớp lời theo MV YouTube (${autoOff > 0 ? '+' : ''}${autoOff.toFixed(1)}s)`;
             } else if (src === 'YouTube') {
@@ -3293,7 +3447,8 @@ async function loadLyricsForTrack(track) {
     }
 
     lyricsState.lastVideoId = vid;
-    lyricsState.offsetSec = getSavedLyricsOffset(vid);
+    lyricsState.sharedOffset = Number(track.lyrics_offset) || 0;
+    lyricsState.personalOffset = getSavedLyricsOffset(vid);
     updateLyricsOffsetUI();
 
     const cached = lyricsState.cache.get(vid);
@@ -3335,6 +3490,7 @@ async function loadLyricsForTrack(track) {
             author: track.author || '',
             duration: String(effectiveDuration),
             video_id: vid,
+            v: LYRICS_API_VERSION,
         });
         const res = await fetch(`/api/lyrics?${params.toString()}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3429,7 +3585,23 @@ const mcRadioState = {
     currentTracks: [],
 };
 
+function updateAiProactiveToggleUI() {
+    const btn = document.getElementById('btn-ai-proactive-toggle');
+    const lbl = document.getElementById('ai-proactive-toggle-label');
+    if (!btn) return;
+    const isHost = !!window.appState.isHost;
+    const rd = window.appState.roomData;
+    const on = !rd || rd.ai_proactive !== false; // default ON
+    btn.classList.toggle('hidden', !isHost);
+    if (lbl) lbl.textContent = on ? 'Em bé chủ động: Bật' : 'Em bé chủ động: Tắt';
+    btn.classList.toggle('border-pink-500/45', on);
+    btn.classList.toggle('bg-pink-500/15', on);
+    btn.classList.toggle('text-pink-600', on);
+    btn.classList.toggle('dark:text-pink-300', on);
+}
+
 function updateMcToggleUI() {
+    updateAiProactiveToggleUI();
     const btn = document.getElementById('btn-mc-radio-toggle');
     const lbl = document.getElementById('mc-radio-toggle-label');
     if (!btn) return;
@@ -3817,6 +3989,15 @@ function initAiFeatures() {
     });
 
     document.getElementById('btn-stop-mc-speech')?.addEventListener('click', stopMcRadioSpeech);
+
+    // 1b. Toggle proactive Em bé floor 2 (welcome / unanswered questions / reminders) — Host-only
+    document.getElementById('btn-ai-proactive-toggle')?.addEventListener('click', () => {
+        if (!window.appState.isHost) {
+            showToast('Chỉ Chủ phòng mới được bật/tắt chế độ chủ động của Em bé floor 2', 'warning');
+            return;
+        }
+        window.roomSocket.send('toggle_ai_proactive');
+    });
 
     // 2. Messenger-style '@' Mention Autocomplete + Live Input Bold Highlight
     initChatMentionAutocomplete();

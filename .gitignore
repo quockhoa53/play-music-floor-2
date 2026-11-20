@@ -24,3 +24,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# AI eval run reports (baseline.json is committed)
+tests/ai_eval/reports/

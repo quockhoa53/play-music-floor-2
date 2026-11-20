@@ -625,6 +625,14 @@
                                     <span>🎙️</span>
                                     <span id="mc-radio-toggle-label">MC: Tắt</span>
                                 </button>
+
+                                <!-- Proactive Em bé floor 2 Toggle (Host-only — Default ON) -->
+                                <button type="button" id="btn-ai-proactive-toggle"
+                                    class="hidden surface-subtle px-3 py-2 rounded-full text-xs font-bold text-main hover:border-pink-500/40 inline-flex items-center gap-1.5 transition"
+                                    title="Chủ phòng Bật / Tắt: Em bé floor 2 tự chào người mới, trả lời câu hỏi bị bỏ ngỏ, nhắc lịch hẹn">
+                                    <span>🤖</span>
+                                    <span id="ai-proactive-toggle-label">Em bé chủ động: Bật</span>
+                                </button>
                             </div>
 
                             <!-- Local Volume -->
@@ -815,6 +823,7 @@
                         </div>
                         <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2 flex-shrink-0">
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">✨ Nổi bật</button>
+                            <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0 inline-flex items-center gap-1" data-q="bé floor 2"><img src="/static/img/em-be-floor-2.svg" alt="" class="w-3.5 h-3.5">Bé Floor 2</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cute cat">🐱 Cute</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music dance">🎵 Nhạc</button>
                             <button type="button" class="js-sticker-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="love heart">❤️ Tim</button>
@@ -842,6 +851,7 @@
                         <!-- Diverse Quick GIF Filter Chips -->
                         <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar mb-2 flex-shrink-0">
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="">🔥 Nổi bật</button>
+                            <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0 inline-flex items-center gap-1" data-q="bé floor 2"><img src="/static/img/em-be-floor-2.svg" alt="" class="w-3.5 h-3.5">Bé Floor 2</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="cat dance">🐱 Mèo</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="music vibe">🎵 Quẩy</button>
                             <button type="button" class="js-gif-tag surface-subtle px-2.5 py-1 rounded-full text-[11px] font-semibold text-sub hover:text-main flex-shrink-0" data-q="love heart">❤️ Tim</button>
@@ -911,7 +921,7 @@
                                     class="hidden absolute inset-0 pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm flex items-center"></div>
                                 <input type="text" id="chat-text-input" maxlength="400" autocomplete="off"
                                     class="relative z-10 bg-transparent border-0 focus:outline-none focus:ring-0 w-full pl-3.5 pr-10 py-2 rounded-full text-base sm:text-sm"
-                                    placeholder="Nhắn tin (gõ @ gọi Em bé floor 2)...">
+                                    placeholder="Nhắn tin · @ gọi Em bé">
                                 <button type="submit" id="btn-chat-send"
                                     class="btn-gradient absolute right-1 z-20 w-8 h-8 rounded-full flex items-center justify-center"
                                     title="Gửi tin nhắn">
@@ -1066,9 +1076,9 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/socket.js?v=2.28"></script>
-    <script src="/static/js/player.js?v=2.28"></script>
-    <script src="/static/js/chat.js?v=2.28"></script>
-    <script src="/static/js/app.js?v=2.28"></script>
+    <script src="/static/js/socket.js?v=2.29"></script>
+    <script src="/static/js/player.js?v=2.29"></script>
+    <script src="/static/js/chat.js?v=2.29"></script>
+    <script src="/static/js/app.js?v=2.29"></script>
 </body>
 </html>

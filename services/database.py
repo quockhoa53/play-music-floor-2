@@ -410,6 +410,163 @@ class DatabaseManager:
             print(f"[DB] get_media error: {e}")
         return None
 
+    # ------------------------------------------------------------------
+    # SHARED LYRICS SYNC OFFSETS (per YouTube video, calibrated by room hosts)
+    # Optional table `lyrics_offsets`; when it does not exist we silently stay in-memory.
+    # ------------------------------------------------------------------
+    _lyrics_offsets_table_missing: bool = False
+
+    def get_lyrics_offset_sync(self, video_id: str) -> Optional[float]:
+        if not self.connected or self._lyrics_offsets_table_missing:
+            return None
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT offset_sec FROM lyrics_offsets WHERE video_id = %s", (video_id,))
+                        row = cur.fetchone()
+                        return float(row[0]) if row else None
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                r = self._rest_client.get(
+                    "/lyrics_offsets", params={"video_id": f"eq.{video_id}", "select": "offset_sec"}
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    return float(data[0]["offset_sec"]) if data else None
+                if r.status_code == 404 or "lyrics_offsets" in r.text:
+                    self._lyrics_offsets_table_missing = True
+        except Exception as e:
+            if "lyrics_offsets" in str(e):
+                self._lyrics_offsets_table_missing = True
+            else:
+                print(f"[DB] get_lyrics_offset error: {e}")
+        return None
+
+    def save_lyrics_offset_sync(self, video_id: str, offset_sec: float, updated_by: str = ""):
+        if not self.connected or self._lyrics_offsets_table_missing:
+            return
+        row = {"video_id": video_id, "offset_sec": float(offset_sec), "updated_by": updated_by[:40], "updated_at": time.time()}
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO lyrics_offsets (video_id, offset_sec, updated_by, updated_at)
+                            VALUES (%(video_id)s, %(offset_sec)s, %(updated_by)s, %(updated_at)s)
+                            ON CONFLICT (video_id) DO UPDATE
+                            SET offset_sec = EXCLUDED.offset_sec, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
+                            """,
+                            row,
+                        )
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                r = self._rest_client.post(
+                    "/lyrics_offsets",
+                    json=row,
+                    headers={"Prefer": "resolution=merge-duplicates"},
+                    params={"on_conflict": "video_id"},
+                )
+                if r.status_code == 404 or (r.status_code >= 400 and "lyrics_offsets" in r.text):
+                    self._lyrics_offsets_table_missing = True
+        except Exception as e:
+            if "lyrics_offsets" in str(e):
+                self._lyrics_offsets_table_missing = True
+            else:
+                print(f"[DB] save_lyrics_offset error: {e}")
+
+    def schedule_save_lyrics_offset(self, video_id: str, offset_sec: float, updated_by: str = ""):
+        if not self.connected:
+            return
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self.save_lyrics_offset_sync, video_id, offset_sec, updated_by)
+        except RuntimeError:
+            self.save_lyrics_offset_sync(video_id, offset_sec, updated_by)
+
+    # ------------------------------------------------------------------
+    # GENERIC JSON DOCUMENTS (member_profiles / room_memories for AI memory)
+    # Optional tables; when missing we silently stay in-memory.
+    # ------------------------------------------------------------------
+    _missing_json_tables: set = set()
+
+    def _json_table_missing(self, table: str, status: int, text: str) -> bool:
+        if status == 404 or (status >= 400 and table in (text or "")):
+            self._missing_json_tables.add(table)
+            return True
+        return False
+
+    def get_json_doc_sync(self, table: str, key_col: str, key: str) -> Optional[Dict[str, Any]]:
+        if not self.connected or table in self._missing_json_tables:
+            return None
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SELECT data FROM {table} WHERE {key_col} = %s", (key,))
+                        row = cur.fetchone()
+                        if not row:
+                            return None
+                        data = row[0]
+                        return data if isinstance(data, dict) else json.loads(data)
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                r = self._rest_client.get(f"/{table}", params={key_col: f"eq.{key}", "select": "data"})
+                if r.status_code == 200:
+                    rows = r.json()
+                    if rows:
+                        data = rows[0].get("data")
+                        return data if isinstance(data, dict) else json.loads(data or "{}")
+                    return None
+                self._json_table_missing(table, r.status_code, r.text)
+        except Exception as e:
+            if table in str(e):
+                self._missing_json_tables.add(table)
+            else:
+                print(f"[DB] get_json_doc {table} error: {e}")
+        return None
+
+    def upsert_json_doc_sync(self, table: str, key_col: str, key: str, data: Dict[str, Any]):
+        if not self.connected or table in self._missing_json_tables:
+            return
+        row = {key_col: key, "data": data, "updated_at": time.time()}
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {table} ({key_col}, data, updated_at) VALUES (%s, %s::jsonb, %s)
+                            ON CONFLICT ({key_col}) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at
+                            """,
+                            (key, json.dumps(data, ensure_ascii=False), row["updated_at"]),
+                        )
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                r = self._rest_client.post(
+                    f"/{table}",
+                    json=row,
+                    headers={"Prefer": "resolution=merge-duplicates"},
+                    params={"on_conflict": key_col},
+                )
+                if r.status_code >= 400:
+                    if not self._json_table_missing(table, r.status_code, r.text):
+                        print(f"[DB] upsert_json_doc {table} HTTP {r.status_code}: {r.text[:160]}")
+        except Exception as e:
+            if table in str(e):
+                self._missing_json_tables.add(table)
+            else:
+                print(f"[DB] upsert_json_doc {table} error: {e}")
+
+    def delete_json_doc_sync(self, table: str, key_col: str, key: str):
+        if not self.connected or table in self._missing_json_tables:
+            return
+        try:
+            if self.backend_name == "postgres":
+                with self._pg_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"DELETE FROM {table} WHERE {key_col} = %s", (key,))
+            elif self.backend_name == "supabase_rest" and self._rest_client:
+                self._rest_client.delete(f"/{table}", params={key_col: f"eq.{key}"})
+        except Exception as e:
+            print(f"[DB] delete_json_doc {table} error: {e}")
+
     # Non-blocking async fire-and-forget helpers for hot WebSocket paths
     def schedule_save_room(self, room_data: Dict[str, Any]):
         if not self.connected:

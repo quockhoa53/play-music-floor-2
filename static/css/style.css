@@ -814,3 +814,20 @@ html:not(.dark) .radio-deck {
 .ai-rich .ai-list-ol { list-style: decimal; }
 .ai-rich .ai-list li { margin: 0.15rem 0; padding-left: 0.1rem; }
 .ai-rich .ai-list li::marker { color: #ec4899; font-weight: 800; }
+
+/* Live streaming caret for Em bé floor 2 replies */
+.ai-stream-caret { display: inline-block; margin-left: 1px; color: #ec4899; animation: ai-caret-blink 0.9s steps(1) infinite; }
+@keyframes ai-caret-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .ai-stream-caret { animation: none; } }
+
+/* Em bé floor 2 mascot */
+.em-be-mascot { border-radius: 9999px; filter: drop-shadow(0 2px 4px rgba(236, 72, 153, 0.28)); user-select: none; }
+.em-be-mascot-bounce { animation: em-be-bounce 1.6s ease-in-out infinite; transform-origin: 50% 100%; }
+@keyframes em-be-bounce { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-2px) rotate(-4deg); } }
+@media (prefers-reduced-motion: reduce) { .em-be-mascot-bounce { animation: none; } }
+
+/* Chat readability: comfortable spacing inside AI rich replies */
+#chat-messages-container .ai-rich > * + * { margin-top: 0.55rem; }
+
+/* Compact, lighter chat input placeholder (input text stays 16px on mobile to avoid iOS zoom) */
+#chat-text-input::placeholder { font-size: 13px; color: var(--text-dim, #94a3b8); opacity: 0.9; }

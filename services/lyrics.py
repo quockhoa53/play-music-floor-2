@@ -287,13 +287,19 @@ async def _fetch_youtube_captions(video_id: str, prefer_lang: str = "vi") -> Opt
         if resp.status_code != 200:
             return None
         pj = resp.json()
+        # The real video length (needed to pick the right LRCLIB version) comes for free with this call
+        try:
+            video_duration = float((pj.get("videoDetails") or {}).get("lengthSeconds") or 0)
+        except (TypeError, ValueError):
+            video_duration = 0.0
+        no_caps = {"kind": None, "lang": "", "lines": [], "words": [], "duration": video_duration}
         caps = (
             pj.get("captions", {})
             .get("playerCaptionsTracklistRenderer", {})
             .get("captionTracks", [])
         )
         if not caps:
-            return None
+            return no_caps
 
         def _track_rank(c: Dict[str, Any]) -> Tuple[int, int]:
             lang = (c.get("languageCode") or "").lower()
@@ -313,16 +319,16 @@ async def _fetch_youtube_captions(video_id: str, prefer_lang: str = "vi") -> Opt
         best_cap = caps_sorted[0]
         # Avoid picking an unrelated translated language (e.g. Arabic/Portuguese) for alignment
         if _track_rank(best_cap)[0] >= 9:
-            return None
+            return no_caps
 
         base_url = best_cap.get("baseUrl") or ""
         if not base_url:
-            return None
+            return no_caps
         json3_url = re.sub(r"&fmt=[^&]+", "", base_url) + "&fmt=json3"
 
         cap_resp = await client.get(json3_url)
         if cap_resp.status_code != 200 or not cap_resp.text.strip().startswith("{"):
-            return None
+            return no_caps
         cj = cap_resp.json()
 
         lines: List[Dict[str, Any]] = []
@@ -349,6 +355,7 @@ async def _fetch_youtube_captions(video_id: str, prefer_lang: str = "vi") -> Opt
             "lang": (best_cap.get("languageCode") or "").lower(),
             "lines": lines,
             "words": words,
+            "duration": video_duration,
         }
     except Exception:
         return None
@@ -419,7 +426,8 @@ def estimate_lrc_offset_from_captions(
     return round(median, 2)
 
 
-async def _fetch_lyrics_from_lrclib(title: str, author: str, duration: int) -> Dict[str, Any]:
+async def _search_lrclib(title: str, author: str) -> Tuple[List[Dict[str, Any]], str, str]:
+    """Search LRCLIB (regex-cleaned title first, AI-normalized title as fallback). Returns all candidates."""
     clean_title, clean_author = clean_youtube_title_for_lyrics(title, author)
     queries: List[str] = []
     if clean_title and clean_author:
@@ -431,20 +439,28 @@ async def _fetch_lyrics_from_lrclib(title: str, author: str, duration: int) -> D
 
     client = _get_lyrics_client()
     candidates: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    def _add(items: Any) -> None:
+        if isinstance(items, list):
+            for x in items:
+                key = x.get("id") or (x.get("trackName"), x.get("artistName"), x.get("duration"))
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    candidates.append(x)
 
     for q in queries:
         try:
             resp = await client.get("https://lrclib.net/api/search", params={"q": q})
             if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    candidates = data
-                    if any((x.get("syncedLyrics") or "").strip() for x in candidates):
-                        break
+                _add(resp.json())
+                # Keep collecting across queries: more versions = better chance of an exact-duration match
+                if sum(1 for x in candidates if (x.get("syncedLyrics") or "").strip()) >= 3:
+                    break
         except Exception as e:
             print(f"[lyrics fetch error] {e}")
 
-    # AI Smart Title Normalization Fallback (Nhóm 2B): when regex cleaning finds no synced lyrics
+    # AI Smart Title Normalization Fallback: when regex cleaning finds no synced lyrics
     if not any((x.get("syncedLyrics") or "").strip() for x in candidates):
         try:
             from services.ai import normalize_track_for_lyrics
@@ -462,73 +478,213 @@ async def _fetch_lyrics_from_lrclib(title: str, author: str, duration: int) -> D
                         continue
                     resp = await client.get("https://lrclib.net/api/search", params={"q": aq})
                     if resp.status_code == 200:
-                        data = resp.json()
-                        if isinstance(data, list) and data:
-                            candidates = data
+                        before = len(candidates)
+                        _add(resp.json())
+                        if len(candidates) > before:
                             clean_title = ai_t or clean_title
                             clean_author = ai_a or clean_author
-                            if any((x.get("syncedLyrics") or "").strip() for x in candidates):
-                                break
+                        if any((x.get("syncedLyrics") or "").strip() for x in candidates):
+                            break
         except Exception as e:
             print(f"[lyrics ai norm fallback error] {e}")
 
-    if not candidates:
-        return {
-            "found": False,
-            "synced": False,
-            "lines": [],
-            "plain_lines": [],
-            "source": None,
-            "matched_title": clean_title or title,
-            "matched_artist": clean_author or author,
-            "auto_offset": 0.0,
-        }
+    return candidates, clean_title, clean_author
 
-    best = max(
-        candidates,
-        key=lambda item: _score_lrclib_candidate(item, duration, clean_title, clean_author, title),
-    )
-    synced_raw = (best.get("syncedLyrics") or "").strip()
-    plain_raw = (best.get("plainLyrics") or "").strip()
 
-    synced_lines = parse_lrc_lyrics(synced_raw) if synced_raw else []
-    plain_lines = [ln.strip() for ln in plain_raw.splitlines() if ln.strip()] if plain_raw else []
-
-    if synced_lines:
-        return {
-            "found": True,
-            "synced": True,
-            "lines": synced_lines,
-            "plain_lines": plain_lines,
-            "source": "LRCLIB",
-            "matched_title": best.get("trackName") or clean_title or title,
-            "matched_artist": best.get("artistName") or clean_author or author,
-            "matched_duration": best.get("duration") or 0,
-            "auto_offset": 0.0,
-        }
-
-    if plain_lines:
-        return {
-            "found": True,
-            "synced": False,
-            "lines": [],
-            "plain_lines": plain_lines,
-            "source": "LRCLIB",
-            "matched_title": best.get("trackName") or clean_title or title,
-            "matched_artist": best.get("artistName") or clean_author or author,
-            "matched_duration": best.get("duration") or 0,
-            "auto_offset": 0.0,
-        }
-
-    return {
+def _build_lrclib_result(
+    candidates: List[Dict[str, Any]],
+    duration: float,
+    clean_title: str,
+    clean_author: str,
+    raw_title: str,
+) -> Dict[str, Any]:
+    """Pick the best LRCLIB candidate for the REAL video duration and parse it."""
+    empty = {
         "found": False,
         "synced": False,
         "lines": [],
         "plain_lines": [],
         "source": None,
-        "matched_title": clean_title or title,
-        "matched_artist": clean_author or author,
+        "matched_title": clean_title or raw_title,
+        "matched_artist": clean_author or "",
+        "matched_duration": 0,
         "auto_offset": 0.0,
+    }
+    if not candidates:
+        return empty
+
+    best = max(
+        candidates,
+        key=lambda item: _score_lrclib_candidate(item, int(duration or 0), clean_title, clean_author, raw_title),
+    )
+    synced_raw = (best.get("syncedLyrics") or "").strip()
+    plain_raw = (best.get("plainLyrics") or "").strip()
+    synced_lines = parse_lrc_lyrics(synced_raw) if synced_raw else []
+    plain_lines = [ln.strip() for ln in plain_raw.splitlines() if ln.strip()] if plain_raw else []
+    if not synced_lines and not plain_lines:
+        return empty
+    if not plain_lines and synced_lines:
+        plain_lines = [ln["text"] for ln in synced_lines]
+    return {
+        "found": True,
+        "synced": bool(synced_lines),
+        "lines": synced_lines,
+        "plain_lines": plain_lines,
+        "source": "LRCLIB",
+        "matched_title": best.get("trackName") or clean_title or raw_title,
+        "matched_artist": best.get("artistName") or clean_author or "",
+        "matched_duration": float(best.get("duration") or 0),
+        "auto_offset": 0.0,
+    }
+
+
+async def _fetch_lyrics_from_lrclib(title: str, author: str, duration: int) -> Dict[str, Any]:
+    """Backwards-compatible wrapper: search + pick by the given duration."""
+    candidates, clean_title, clean_author = await _search_lrclib(title, author)
+    return _build_lrclib_result(candidates, float(duration or 0), clean_title, clean_author, title)
+
+
+def _text_lang(lines: List[str]) -> str:
+    """'vi' when the lyric text is mostly Vietnamese (diacritics), else 'en'-like (latin)."""
+    sample = " ".join(lines[:40])
+    words = re.findall(r"\w+", sample)
+    if not words:
+        return ""
+    viet = sum(1 for w in words if VIET_DIACRITIC_RE.search(w))
+    return "vi" if viet / len(words) >= 0.12 else "en"
+
+
+def align_lrc_to_captions(
+    lrc_lines: List[Dict[str, Any]],
+    yt_words: List[Tuple[float, str]],
+    is_asr: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Piecewise (per-line) alignment of LRC lyrics onto the YouTube video's caption timeline.
+
+    A single global offset fails when the MV differs structurally from the studio track (story intro,
+    extended bridge, cut chorus...). Here every LRC line is matched to candidate positions in the caption
+    word stream, a dynamic program picks the best strictly-increasing chain of matches (favouring a smooth
+    offset), and unmatched lines inherit the offset of their nearest anchor.
+
+    Returns {"lines", "anchors", "coverage", "offset"} or None when there is not enough evidence.
+    """
+    if not lrc_lines or not yt_words or len(yt_words) < 6:
+        return None
+
+    yt_only = [w for _, w in yt_words]
+    positions: Dict[str, List[int]] = {}
+    for i, w in enumerate(yt_only):
+        positions.setdefault(w, []).append(i)
+
+    # 1. Candidate caption times for each LRC line
+    line_cands: List[List[float]] = []
+    eligible = 0
+    for item in lrc_lines:
+        lw = _norm_words(item.get("text", ""))
+        if len(lw) < 3:
+            line_cands.append([])
+            continue
+        eligible += 1
+        target = lw[:6]
+        need = len(target) if len(target) <= 3 else max(3, int(round(len(target) * 0.65)))
+        starts = set()
+        for k in range(min(2, len(target))):
+            for p in positions.get(target[k], []):
+                starts.add(max(0, p - k))
+        cands: List[float] = []
+        for s in sorted(starts):
+            window = yt_only[s : s + len(target) + 3]
+            pool = list(window)
+            hits = 0
+            for w in target:
+                if w in pool:
+                    pool.remove(w)
+                    hits += 1
+            if hits >= need:
+                t = yt_words[s][0]
+                if not cands or t - cands[-1] > 1.0:
+                    cands.append(t)
+        line_cands.append(cands[:8])
+
+    # 2. DP over (line, candidate): longest strictly increasing chain, penalizing offset jumps
+    states: List[Tuple[int, float, float]] = []  # (line_idx, cap_time, delta)
+    for li, cands in enumerate(line_cands):
+        lt = float(lrc_lines[li]["time"])
+        for ct in cands:
+            d = ct - lt
+            if -60.0 <= d <= 180.0:
+                states.append((li, ct, d))
+    if len(states) < 3:
+        return None
+
+    n = len(states)
+    score = [1.0] * n
+    prev = [-1] * n
+    for b in range(n):
+        lb, tb, db = states[b]
+        for a in range(b):
+            la, ta, da = states[a]
+            if la >= lb or tb <= ta + 0.2:
+                continue
+            jump = abs(db - da)
+            gain = 1.0 if jump <= 1.5 else (0.35 if jump <= 30 else -1.0)
+            if score[a] + gain > score[b]:
+                score[b] = score[a] + gain
+                prev[b] = a
+    end = max(range(n), key=lambda i: score[i])
+    chain: List[Tuple[int, float, float]] = []
+    while end != -1:
+        chain.append(states[end])
+        end = prev[end]
+    chain.reverse()
+
+    # 3. Drop isolated anchors whose offset disagrees with both neighbours (accidental word matches)
+    anchors: List[Tuple[int, float, float]] = []
+    for i, st in enumerate(chain):
+        neigh = [chain[j][2] for j in (i - 1, i + 1) if 0 <= j < len(chain)]
+        if len(chain) <= 2 or any(abs(st[2] - d) <= 1.5 for d in neigh):
+            anchors.append(st)
+    if len(anchors) < 3:
+        return None
+
+    asr_lag = 0.35 if is_asr else 0.0
+    anchor_by_line = {li: (ct - asr_lag, d - asr_lag) for li, ct, d in anchors}
+    anchor_lines = sorted(anchor_by_line)
+
+    out: List[Dict[str, Any]] = []
+    for li, item in enumerate(lrc_lines):
+        lt = float(item["time"])
+        if li in anchor_by_line:
+            t = anchor_by_line[li][0]
+        else:
+            before = [a for a in anchor_lines if a < li]
+            after = [a for a in anchor_lines if a > li]
+            if before and after:
+                a, b = before[-1], after[0]
+                da, db = anchor_by_line[a][1], anchor_by_line[b][1]
+                la, lb = float(lrc_lines[a]["time"]), float(lrc_lines[b]["time"])
+                if abs(da - db) <= 1.5 and lb > la:
+                    d = da + (db - da) * (lt - la) / (lb - la)  # smooth drift: interpolate
+                else:
+                    d = da if (lt - la) <= (lb - lt) else db   # structural jump: nearest anchor wins
+            elif before:
+                d = anchor_by_line[before[-1]][1]
+            else:
+                d = anchor_by_line[after[0]][1]
+            t = lt + d
+        out.append({"time": max(0.0, round(t, 2)), "text": item["text"]})
+
+    # Keep timestamps monotonic for the player highlight
+    for i in range(1, len(out)):
+        if out[i]["time"] < out[i - 1]["time"]:
+            out[i]["time"] = out[i - 1]["time"]
+
+    deltas = sorted(d for _, _, d in anchors)
+    return {
+        "lines": out,
+        "anchors": len(anchors),
+        "coverage": round(len(anchors) / max(1, eligible), 2),
+        "offset": round(deltas[len(deltas) // 2] - asr_lag, 2),
     }
 
 
@@ -538,42 +694,49 @@ async def _fetch_synced_lyrics_combined(
     duration: int,
     video_id: str,
 ) -> Dict[str, Any]:
-    """Fetch LRCLIB + YouTube captions concurrently and auto-align timestamps to the YouTube MV."""
+    """Find lyrics and sync them to THIS YouTube video.
+
+    Priority (best sync first):
+      1. LRCLIB lyrics piecewise-aligned onto the video's same-language captions (manual or ASR).
+      2. The video's own manual same-language captions used directly as lyrics.
+      3. LRCLIB version whose duration matches the real video length (studio timing == video timing).
+      4. Best LRCLIB version, flagged low-confidence so the UI offers manual / room calibration.
+    """
     prefer_lang = _detect_preferred_lang(title, author)
-    lrc_task = _fetch_lyrics_from_lrclib(title, author, duration)
-    cap_task = _fetch_youtube_captions(video_id, prefer_lang=prefer_lang) if video_id else asyncio.sleep(0, result=None)
+    cap_task = (
+        _fetch_youtube_captions(video_id, prefer_lang=prefer_lang) if video_id else asyncio.sleep(0, result=None)
+    )
+    (candidates, clean_title, clean_author), yt_caps = await asyncio.gather(_search_lrclib(title, author), cap_task)
 
-    lrc_res, yt_caps = await asyncio.gather(lrc_task, cap_task)
+    video_duration = float((yt_caps or {}).get("duration") or 0) or float(duration or 0)
+    lrc_res = _build_lrclib_result(candidates, video_duration, clean_title, clean_author, title)
+    lrc_res["video_duration"] = video_duration
+    lrc_res["sync_method"] = "none"
+    lrc_res["sync_confidence"] = "none"
 
-    # Case 1: LRCLIB returned synced lines -> align timestamps to YouTube video via caption anchors!
-    if lrc_res.get("synced") and lrc_res.get("lines"):
-        if yt_caps and yt_caps.get("words"):
-            delta = estimate_lrc_offset_from_captions(
-                lrc_res["lines"],
-                yt_caps["words"],
-                is_asr=(yt_caps.get("kind") == "asr"),
-            )
-            if delta is not None and abs(delta) >= 0.35:
-                shifted_lines = [
-                    {
-                        "time": max(0.0, round(float(ln["time"]) + delta, 2)),
-                        "text": ln["text"],
-                    }
-                    for ln in lrc_res["lines"]
-                ]
-                lrc_res["lines"] = shifted_lines
-                lrc_res["auto_offset"] = delta
-                lrc_res["source"] = "LRCLIB + Auto-Sync"
-        return lrc_res
+    lyric_lang = _text_lang([ln["text"] for ln in lrc_res.get("lines") or []]) or prefer_lang
+    cap_lang = ((yt_caps or {}).get("lang") or "").split("-")[0]
+    caps_usable = bool(yt_caps and yt_caps.get("words") and cap_lang == lyric_lang)
 
-    # Case 2: LRCLIB had no synced lines, but YouTube has clean official manual captions in matching language!
+    # 1. Piecewise alignment onto same-language captions
+    if lrc_res.get("synced") and caps_usable:
+        aligned = align_lrc_to_captions(lrc_res["lines"], yt_caps["words"], is_asr=(yt_caps.get("kind") == "asr"))
+        if aligned and aligned["coverage"] >= 0.3:
+            lrc_res["lines"] = aligned["lines"]
+            lrc_res["auto_offset"] = aligned["offset"]
+            lrc_res["source"] = "LRCLIB + Auto-Sync"
+            lrc_res["sync_method"] = "aligned"
+            lrc_res["sync_confidence"] = "high" if aligned["coverage"] >= 0.5 else "medium"
+            lrc_res["align_coverage"] = aligned["coverage"]
+            return lrc_res
+
+    # 2. Manual same-language captions ARE the video's own synced lyrics
     if (
         yt_caps
         and yt_caps.get("kind") == "manual"
-        and yt_caps.get("lang", "").split("-")[0] == prefer_lang
+        and cap_lang == (lyric_lang if lrc_res.get("found") else prefer_lang)
         and len(yt_caps.get("lines") or []) >= 10
     ):
-        clean_title, clean_author = clean_youtube_title_for_lyrics(title, author)
         return {
             "found": True,
             "synced": True,
@@ -582,10 +745,29 @@ async def _fetch_synced_lyrics_combined(
             "source": "YouTube",
             "matched_title": clean_title or title,
             "matched_artist": clean_author or author,
-            "matched_duration": duration,
+            "matched_duration": video_duration,
+            "video_duration": video_duration,
             "auto_offset": 0.0,
+            "sync_method": "youtube_captions",
+            "sync_confidence": "high",
         }
 
+    if not lrc_res.get("synced"):
+        return lrc_res
+
+    # 3/4. No usable captions: trust LRC timing only when the matched version has the video's length
+    matched = float(lrc_res.get("matched_duration") or 0)
+    diff = abs(matched - video_duration) if (matched and video_duration) else None
+    lrc_res["duration_diff"] = round(diff, 1) if diff is not None else None
+    if diff is not None and diff <= 3.0:
+        lrc_res["sync_method"] = "duration_match"
+        lrc_res["sync_confidence"] = "high"
+    elif diff is not None and diff <= 8.0:
+        lrc_res["sync_method"] = "duration_close"
+        lrc_res["sync_confidence"] = "medium"
+    else:
+        lrc_res["sync_method"] = "unaligned"
+        lrc_res["sync_confidence"] = "low"
     return lrc_res
 
 

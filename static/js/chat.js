@@ -1,6 +1,9 @@
 /**
  * Realtime Chat (Text, Emoji, GIF, Image), Floating Reactions & Sound Chimes
  */
+// Em bé floor 2 mascot (used for every bot message, live stream bubble and typing indicator)
+const EM_BE_MASCOT_URL = '/static/img/em-be-floor-2.svg';
+
 class RoomChat {
     constructor() {
         this.container = null;
@@ -70,7 +73,10 @@ class RoomChat {
     isSafeMediaUrl(url, mediaType) {
         if (typeof url !== 'string') return false;
         if (mediaType === 'gif' || mediaType === 'sticker') {
-            return /^https:\/\/media\.giphy\.com\/media\/[A-Za-z0-9]{8,28}\/giphy\.gif$/.test(url);
+            return (
+                /^https:\/\/media\.giphy\.com\/media\/[A-Za-z0-9]{8,28}\/giphy\.gif$/.test(url) ||
+                /^\/images\/stickers\/[a-z0-9_]{1,64}\.gif$/.test(url)
+            );
         }
         if (mediaType === 'image') {
             return /^\/api\/chat\/media\/[a-f0-9]{16,32}$/.test(url);
@@ -103,10 +109,10 @@ class RoomChat {
         const timeStr = this.formatTime(msg.timestamp);
 
         const el = document.createElement('div');
-        el.className = 'flex flex-col mb-3 animate-msg-in';
+        el.className = 'flex flex-col mb-5 animate-msg-in';
 
         if (msg.type === 'system') {
-            el.className = 'flex flex-col mb-2 animate-msg-in';
+            el.className = 'flex flex-col my-3 animate-msg-in';
             el.innerHTML = this.renderSystemMessage(msg.text || '', timeStr);
         } else {
             const isAi = !!(msg.is_ai || msg.user_id === 'ai_em_be_floor_2');
@@ -123,11 +129,13 @@ class RoomChat {
 
             let contentHtml = '';
             if (hasValidMedia) {
-                if (msg.media_type === 'sticker') {
+                const isLocalFloor2Sticker = msg.media_url.startsWith('/images/stickers/');
+                if (msg.media_type === 'sticker' || isLocalFloor2Sticker) {
+                    const sizeClass = isLocalFloor2Sticker ? 'w-36 h-36' : 'w-32 h-32';
                     contentHtml += `
-                        <div class="relative p-1 max-w-[144px] cursor-zoom-in group js-chat-media-wrap">
-                            <img src="${msg.media_url}" alt="Nhãn dán" loading="lazy"
-                                 class="js-chat-media-img block w-32 h-32 object-contain drop-shadow-md transition-transform duration-200 group-hover:scale-105">
+                        <div class="relative p-1 max-w-[160px] cursor-zoom-in group js-chat-media-wrap">
+                            <img src="${msg.media_url}" alt="${isLocalFloor2Sticker ? 'Bé Floor 2' : 'Nhãn dán'}" loading="lazy"
+                                 class="js-chat-media-img block ${sizeClass} object-contain drop-shadow-md transition-transform duration-200 group-hover:scale-105">
                         </div>
                     `;
                 } else {
@@ -172,7 +180,7 @@ class RoomChat {
                                     <div class="text-[10px] text-sub truncate">${this.escapeHtml(t.author || '')}</div>
                                 </div>
                             </div>
-                            <button type="button" class="js-btn-add-ai-track px-2.5 py-1 rounded-lg btn-gradient text-[11px] font-bold flex-shrink-0" data-track-idx="${idx}">
+                            <button type="button" class="js-btn-add-ai-track px-2.5 py-1 rounded-lg btn-gradient text-[11px] font-bold flex-shrink-0" data-track-idx="${idx}" data-video-id="${safeVid}">
                                 + Thêm
                             </button>
                         </div>
@@ -183,10 +191,12 @@ class RoomChat {
 
             el.innerHTML = `
                 <div class="flex items-end gap-2 min-w-0 ${isMe ? 'flex-row-reverse' : ''}">
-                    <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm shadow-sm flex-shrink-0"
+                    ${isAi
+                        ? `<img src="${EM_BE_MASCOT_URL}" alt="Em bé floor 2" class="em-be-mascot w-9 h-9 flex-shrink-0" loading="lazy">`
+                        : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm shadow-sm flex-shrink-0"
                          style="background-color: ${safeColor}22; border: 1.5px solid ${safeColor}88">
                         ${safeAvatar}
-                    </div>
+                    </div>`}
                     <div class="max-w-[82%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}">
                         <div class="flex items-center gap-1.5 mb-1 px-1 text-[11px] max-w-full">
                             <span class="font-semibold truncate" style="color: ${safeColor}">
@@ -202,16 +212,23 @@ class RoomChat {
 
             if (isAi && Array.isArray(msg.suggested_tracks) && msg.suggested_tracks.length > 0) {
                 el.querySelectorAll('.js-btn-add-ai-track').forEach(btn => {
+                    this.applyAiTrackButtonState(btn);
                     btn.addEventListener('click', () => {
+                        if (btn.disabled) return;
                         const idx = parseInt(btn.getAttribute('data-track-idx') || '0', 10);
                         const track = msg.suggested_tracks[idx];
                         if (!track) return;
+                        // Already playing / queued (e.g. the bot just added it): never add a duplicate
+                        if (this.getTrackRoomStatus(track.id)) {
+                            this.applyAiTrackButtonState(btn);
+                            return;
+                        }
                         if (typeof window.canAddTrackInCurrentRoom === 'function' && !window.canAddTrackInCurrentRoom()) {
                             return;
                         }
                         window.roomSocket.addTrack(track);
-                        btn.textContent = '✓ Đã thêm';
-                        btn.className = 'js-btn-add-ai-track px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 text-[11px] font-bold flex-shrink-0';
+                        // Lock immediately; the next queue update keeps it locked with the real status
+                        this.setAiTrackButton(btn, 'pending');
                     });
                 });
             }
@@ -232,7 +249,16 @@ class RoomChat {
             }
         }
 
-        this.container.appendChild(el);
+        const safeMsgId = String(msg.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+        if (safeMsgId) el.dataset.msgId = safeMsgId;
+        // A streamed AI reply finishing: swap the live bubble for the final message in place
+        const streaming = safeMsgId ? this.container.querySelector(`.js-ai-stream[data-msg-id="${safeMsgId}"]`) : null;
+        if (streaming) {
+            el.classList.remove('animate-msg-in');
+            streaming.replaceWith(el);
+        } else {
+            this.container.appendChild(el);
+        }
         if (this.typingEl && this.typingEl.parentNode === this.container) {
             this.container.appendChild(this.typingEl);
         }
@@ -279,7 +305,7 @@ class RoomChat {
         }
     }
 
-    setAiTyping(isTyping, botName = 'Em bé floor 2') {
+    setAiTyping(isTyping, botName = 'Em bé floor 2', status = '') {
         if (!this.container) return;
         if (!isTyping) {
             if (this.typingEl && this.typingEl.parentNode) {
@@ -293,15 +319,94 @@ class RoomChat {
             el.id = 'ai-typing-indicator';
             el.className = 'flex items-center gap-2 px-2 py-1.5 text-xs text-pink-600 dark:text-pink-300 font-semibold animate-pulse';
             el.innerHTML = `
-                <span class="w-6 h-6 rounded-full bg-pink-500/15 border border-pink-500/35 flex items-center justify-center text-xs">🎀</span>
-                <span>${this.escapeHtml(botName)} đang suy nghĩ...</span>
+                <img src="${EM_BE_MASCOT_URL}" alt="" class="em-be-mascot em-be-mascot-bounce w-7 h-7">
+                <span class="js-ai-typing-text"></span>
             `;
             this.typingEl = el;
         }
+        // Tool progress ("đang tra cứu Wikipedia...") so members see what the bot is doing
+        const label = this.typingEl.querySelector('.js-ai-typing-text');
+        if (label) label.textContent = `${botName} ${status ? status : 'đang suy nghĩ'}...`;
         this.container.appendChild(this.typingEl);
         if (!this.isUserScrolledUp) {
             this.scrollToBottom();
         }
+    }
+
+    /** 'playing' | 'queued' | null for a video id, based on the live room state. */
+    getTrackRoomStatus(videoId) {
+        const rd = window.appState && window.appState.roomData;
+        if (!rd || !videoId) return null;
+        if (rd.current_track && rd.current_track.id === videoId) return 'playing';
+        if (Array.isArray(rd.queue) && rd.queue.some(t => t && t.id === videoId)) return 'queued';
+        return null;
+    }
+
+    setAiTrackButton(btn, state) {
+        const base = 'js-btn-add-ai-track px-2.5 py-1 rounded-lg text-[11px] font-bold flex-shrink-0';
+        const locked = 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 cursor-default';
+        const labels = { playing: '▶ Đang phát', queued: '✓ Trong hàng đợi', pending: '✓ Đã thêm' };
+        if (state && labels[state]) {
+            btn.textContent = labels[state];
+            btn.className = `${base} ${locked}`;
+            btn.disabled = true;
+            btn.title = state === 'pending' ? 'Đã gửi yêu cầu thêm bài' : 'Bài này đã có trong phòng';
+            btn.dataset.state = state;
+        } else {
+            btn.textContent = '+ Thêm';
+            btn.className = `${base} btn-gradient`;
+            btn.disabled = false;
+            btn.title = 'Thêm bài này vào hàng đợi';
+            btn.dataset.state = '';
+        }
+    }
+
+    applyAiTrackButtonState(btn) {
+        const status = this.getTrackRoomStatus(btn.getAttribute('data-video-id') || '');
+        // A pending click stays locked until the server confirms (or the song has since finished)
+        if (!status && btn.dataset.state === 'pending') return;
+        this.setAiTrackButton(btn, status);
+    }
+
+    /** Re-sync every AI song card button with the room (call after queue / playback changes). */
+    refreshAiTrackButtons() {
+        if (!this.container) return;
+        this.container.querySelectorAll('.js-btn-add-ai-track').forEach(btn => {
+            if (btn.dataset.state === 'pending') btn.dataset.state = '';
+            this.applyAiTrackButtonState(btn);
+        });
+    }
+
+    /** Create/update the live (streaming) bubble of the AI reply; replaced by the final message later. */
+    upsertAiStream(streamId, text, meta = {}) {
+        if (!this.container || !streamId) return;
+        const safeId = String(streamId).replace(/[^a-zA-Z0-9_-]/g, '');
+        let el = this.container.querySelector(`[data-msg-id="${safeId}"]`);
+        if (el && !el.classList.contains('js-ai-stream')) return; // final message already rendered
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'flex flex-col mb-5 animate-msg-in js-ai-stream';
+            el.dataset.msgId = safeId;
+            const avatar = this.escapeHtml(meta.user_avatar || '🎀');
+            const name = this.escapeHtml(meta.bot_name || 'Em bé floor 2');
+            el.innerHTML = `
+                <div class="flex items-center gap-1.5 mb-1 ml-9">
+                    <span class="text-[11px] font-bold text-pink-600 dark:text-pink-300">${name}</span>
+                    <span class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-600 dark:text-pink-300 border border-pink-500/30 text-[10px] font-extrabold">✨ AI</span>
+                </div>
+                <div class="flex items-end gap-2">
+                    <img src="${EM_BE_MASCOT_URL}" alt="Em bé floor 2" class="em-be-mascot em-be-mascot-bounce w-9 h-9 flex-shrink-0">
+                    <div class="js-ai-stream-body rounded-2xl rounded-bl-sm px-3.5 py-2 text-[13px] leading-relaxed max-w-full break-words [overflow-wrap:anywhere] shadow-sm chat-bubble-other ring-1 ring-pink-500/35 bg-gradient-to-br from-pink-500/10 via-violet-500/10 to-indigo-500/5"></div>
+                </div>
+            `;
+            this.container.appendChild(el);
+        }
+        const body = el.querySelector('.js-ai-stream-body');
+        if (body) body.innerHTML = this.formatAiMessage(text) + '<span class="ai-stream-caret">▍</span>';
+        if (this.typingEl && this.typingEl.parentNode === this.container) {
+            this.container.appendChild(this.typingEl);
+        }
+        if (!this.isUserScrolledUp) this.scrollToBottom();
     }
 
     renderSystemMessage(rawText) {

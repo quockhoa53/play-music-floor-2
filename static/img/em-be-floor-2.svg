@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Em bé floor 2">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#fff1f8"/>
+      <stop offset="1" stop-color="#fbcfe8"/>
+    </radialGradient>
+    <linearGradient id="hair" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/>
+      <stop offset="1" stop-color="#db2777"/>
+    </linearGradient>
+    <linearGradient id="bow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fb7185"/>
+      <stop offset="1" stop-color="#e11d48"/>
+    </linearGradient>
+    <linearGradient id="phone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Badge background -->
+  <circle cx="48" cy="48" r="46" fill="url(#bg)"/>
+
+  <!-- Hair (back) -->
+  <path d="M20 54c0-19 12.5-32 28-32s28 13 28 32v12c0 3-2 5-5 5H25c-3 0-5-2-5-5z" fill="url(#hair)"/>
+
+  <!-- Face -->
+  <ellipse cx="48" cy="55" rx="21" ry="20" fill="#ffe4d6"/>
+
+  <!-- Bangs -->
+  <path d="M27 50c2-13 10-21 21-21s19 8 21 21c-5-6-10-8-14-8-2 4-6 6-10 5 1-2 1-4 0-5-6 1-12 4-18 8z" fill="url(#hair)"/>
+
+  <!-- Headphones band -->
+  <path d="M22 54c0-18 11.5-30 26-30s26 12 26 30" fill="none" stroke="url(#phone)" stroke-width="5" stroke-linecap="round"/>
+  <!-- Ear cups -->
+  <rect x="15" y="50" width="11" height="17" rx="5.5" fill="url(#phone)"/>
+  <rect x="70" y="50" width="11" height="17" rx="5.5" fill="url(#phone)"/>
+  <rect x="18" y="54" width="5" height="9" rx="2.5" fill="#ddd6fe"/>
+  <rect x="73" y="54" width="5" height="9" rx="2.5" fill="#ddd6fe"/>
+
+  <!-- Eyes -->
+  <ellipse cx="40" cy="57" rx="3.6" ry="4.4" fill="#3b0764"/>
+  <ellipse cx="56" cy="57" rx="3.6" ry="4.4" fill="#3b0764"/>
+  <circle cx="41.3" cy="55.4" r="1.4" fill="#fff"/>
+  <circle cx="57.3" cy="55.4" r="1.4" fill="#fff"/>
+
+  <!-- Blush -->
+  <ellipse cx="34" cy="64" rx="4" ry="2.4" fill="#fb7185" opacity=".45"/>
+  <ellipse cx="62" cy="64" rx="4" ry="2.4" fill="#fb7185" opacity=".45"/>
+
+  <!-- Smile -->
+  <path d="M44 65c2 2.6 6 2.6 8 0" fill="none" stroke="#be185d" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Big bow (the 🎀 signature) -->
+  <g transform="translate(62 25) rotate(14)">
+    <path d="M0 0c-3-7-13-9-15-3s6 10 15 3z" fill="url(#bow)"/>
+    <path d="M0 0c3-7 13-9 15-3s-6 10-15 3z" fill="url(#bow)"/>
+    <circle r="3.4" fill="#be123c"/>
+    <path d="M-1 2l-4 9M1 2l4 9" stroke="#e11d48" stroke-width="2.4" stroke-linecap="round"/>
+  </g>
+
+  <!-- Music note -->
+  <g fill="#8b5cf6">
+    <path d="M14 30v-11l9-2v11" fill="none" stroke="#8b5cf6" stroke-width="2.2" stroke-linejoin="round"/>
+    <ellipse cx="12" cy="30.5" rx="3" ry="2.4"/>
+    <ellipse cx="21" cy="28.5" rx="3" ry="2.4"/>
+  </g>
+</svg>

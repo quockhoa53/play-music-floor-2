@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from services.cache import TTLCache
+from services.telemetry import telemetry
+from services.ratelimit import estimate_tokens, rate_guard, retry_after_seconds
 
 AI_BOT_ID = "ai_em_be_floor_2"
 AI_BOT_NAME = "Em bé floor 2"
@@ -189,14 +191,16 @@ def _parse_json_lenient(raw: str) -> Optional[Dict[str, Any]]:
 
 
 async def groq_chat(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     *,
     temperature: float = 0.75,
     max_tokens: int = 420,
     json_mode: bool = False,
     model: Optional[str] = None,
 ) -> Optional[str]:
-    """Call Groq Chat Completions with alternating 2-key rotation & automatic model/key failover."""
+    """Groq chat completion with per-(key, model) client-side TPM budgeting, exact retry-after cooldowns
+    and key/model failover. Requests that would exceed a model's minute budget go to another key / model
+    instead of being sent and rejected with 429."""
     order = key_rotator.next_order()
     if not order:
         return None
@@ -206,60 +210,91 @@ async def groq_chat(
     # json_mode: Groq rejects output that is not valid JSON (400 json_validate_failed) but returns the text the
     # model wrote. Keep it so callers can still salvage a usable reply if every attempt fails.
     salvaged_text: Optional[str] = None
+    if json_mode:
+        telemetry.incr("json.calls")
 
-    for m_name in models_to_try:
-        for key_idx, api_key in order:
-            payload: Dict[str, Any] = {
-                "model": m_name,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens if m_name == PRIMARY_MODEL else max(max_tokens, 600),
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
+    for attempt in range(2):
+        min_wait: Optional[float] = None
+        for m_name in models_to_try:
+            for key_idx, api_key in order:
+                req_max = max_tokens if m_name == PRIMARY_MODEL else max(max_tokens, 600)
+                payload: Dict[str, Any] = {
+                    "model": m_name,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": req_max,
+                }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
 
-            try:
-                resp = await client.post(
-                    GROQ_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                key_rotator.mark_used(key_idx)
+                est = estimate_tokens(messages, req_max)
+                wait = rate_guard.check(key_idx, m_name, est)
+                if wait > 0:
+                    rate_guard.skipped_for_budget += 1
+                    telemetry.incr(f"ratelimit.skipped.{m_name}")
+                    min_wait = wait if min_wait is None else min(min_wait, wait)
+                    continue
+                rate_guard.reserve(key_idx, m_name, est)
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = (
-                        data.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
+                t0 = time.time()
+                try:
+                    resp = await client.post(
+                        GROQ_API_URL,
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json=payload,
                     )
-                    cleaned = _clean_model_text(content)
-                    if cleaned:
-                        return cleaned
-                elif resp.status_code == 429:
-                    retry_after = float(resp.headers.get("retry-after", "25") or 25)
-                    key_rotator.mark_rate_limited(key_idx, retry_after)
+                    key_rotator.mark_used(key_idx)
+                    telemetry.incr(f"groq.{m_name}.{resp.status_code}")
+                    telemetry.timing(f"groq_ms.{m_name}", (time.time() - t0) * 1000)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        rate_guard.settle(key_idx, m_name, est, (data.get("usage") or {}).get("total_tokens"))
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        cleaned = _clean_model_text(content)
+                        if cleaned:
+                            return cleaned
+                    elif resp.status_code == 429:
+                        # Quotas are per model: cool down only this (key, model), for exactly as long as Groq says
+                        body = resp.text[:400]
+                        cool = retry_after_seconds(resp, body)
+                        rate_guard.cool(key_idx, m_name, cool)
+                        telemetry.event("groq_429", model=m_name, key=key_idx, wait_s=round(cool, 1),
+                                        daily="per day" in body, log=cool > 30)
+                        continue
+                    elif resp.status_code in (401, 403):
+                        key_rotator.mark_rate_limited(key_idx, 120.0)
+                        continue
+                    elif resp.status_code == 400 and json_mode:
+                        try:
+                            failed = resp.json().get("error", {}).get("failed_generation")
+                        except Exception:
+                            failed = None
+                        if failed and not salvaged_text:
+                            salvaged_text = _clean_model_text(str(failed))
+                        telemetry.incr("json.validate_failed")
+                        continue
+                    else:
+                        # Try next key/model on 5xx / 404 / other 400s
+                        if resp.status_code == 400:
+                            telemetry.event("groq_400", model=m_name, body=resp.text[:200])
+                        continue
+                except Exception as exc:
+                    print(f"[ai groq err key#{key_idx} model={m_name}] {exc}")
+                    telemetry.incr(f"groq.{m_name}.exception")
                     continue
-                elif resp.status_code in (401, 403):
-                    key_rotator.mark_rate_limited(key_idx, 120.0)
-                    continue
-                elif resp.status_code == 400 and json_mode:
-                    try:
-                        failed = resp.json().get("error", {}).get("failed_generation")
-                    except Exception:
-                        failed = None
-                    if failed and not salvaged_text:
-                        salvaged_text = _clean_model_text(str(failed))
-                    continue
-                else:
-                    # Try next key/model on 5xx or 404
-                    continue
-            except Exception as exc:
-                print(f"[ai groq err key#{key_idx} model={m_name}] {exc}")
-                continue
+        # Everything was over budget for a few seconds only: wait once instead of failing the reply
+        if attempt == 0 and min_wait is not None and min_wait <= 6.0 and not salvaged_text:
+            await asyncio.sleep(min_wait + 0.2)
+            continue
+        break
+
+    if json_mode:
+        # Every attempt failed to produce valid JSON (salvaged plain text or nothing at all)
+        telemetry.incr("json.failed")
+        telemetry.event("json_failed", models=models_to_try, salvaged=bool(salvaged_text))
+    elif not salvaged_text:
+        telemetry.event("groq_all_failed", models=models_to_try)
     return salvaged_text or None
 
 
@@ -384,6 +419,10 @@ def _format_convo_line(m: Dict[str, Any]) -> Optional[str]:
         return None
     name = m.get("user_name") or "Khách"
     media = {"gif": "[gửi GIF]", "sticker": "[gửi sticker]", "image": "[gửi ảnh]"}.get(str(m.get("media_type") or ""), "")
+    caption = str(m.get("media_caption") or "").strip()
+    if media and caption:
+        # What the bot "sees" in the picture (vision caption generated in the background)
+        media = media[:-1] + f": {caption[:200]}]"
     if m.get("is_ai"):
         body = text[:CONVO_AI_MAX_CHARS] + ("…" if len(text) > CONVO_AI_MAX_CHARS else "")
         sugg = [str(s.get("title", ""))[:50] for s in (m.get("suggested_tracks") or []) if s.get("title")]
@@ -487,7 +526,13 @@ def _chat_msgs_since(messages: List[Dict[str, Any]], ts: float) -> int:
     return sum(1 for m in messages if m.get("type") == "chat" and float(m.get("timestamp") or 0) > ts)
 
 
-async def _summarize_conversation(transcript: str) -> str:
+def _now_label_for_digest() -> str:
+    from services.memory import now_label_vn
+
+    return now_label_vn()
+
+
+async def _summarize_conversation(transcript: str) -> Tuple[str, List[Dict[str, str]]]:
     raw = await groq_chat(
         [
             {
@@ -502,8 +547,17 @@ async def _summarize_conversation(transcript: str) -> str:
                     '"agreements": ["điều cả phòng đã thống nhất / kế hoạch"], '
                     '"requests_to_bot": ["những gì thành viên đã nhờ Em bé floor 2 và Em bé đã trả lời ra sao"], '
                     '"mood": "không khí phòng và cảm xúc nổi bật của từng người", '
-                    '"inside_jokes": ["câu đùa / biệt danh / meme riêng của phòng nếu có"]}\n'
-                    "Tối đa 6 threads, mỗi mục ngắn gọn. Mục nào không có thì để mảng rỗng."
+                    '"inside_jokes": ["câu đùa / biệt danh / meme riêng của phòng nếu có"], '
+                    '"durable_facts": [{"who": "tên thành viên hoặc phòng", "fact": "điều đáng nhớ LÂU DÀI"}], '
+                    '"plans": [{"when": "YYYY-MM-DD HH:MM", "what": "việc cả phòng hẹn làm", "who": "ai đề xuất"}]}\n'
+                    "Tối đa 6 threads, mỗi mục ngắn gọn. Mục nào không có thì để mảng rỗng.\n"
+                    "durable_facts: CHỈ những điều còn đúng nhiều ngày sau và đáng để nhớ về một người hoặc cả phòng "
+                    "(sở thích / ghét thể loại hay ca sĩ, thú cưng, biệt danh, sinh nhật, nghề nghiệp, kế hoạch có ngày giờ, "
+                    "chuyện đùa riêng). KHÔNG ghi cảm xúc nhất thời, câu đùa vu vơ, thông tin nhạy cảm (số điện thoại, địa chỉ, mật khẩu, sức khỏe). "
+                    "who = đúng tên thành viên đã nói, hoặc 'phòng' nếu là chuyện chung. Tối đa 5 mục.\n"
+                    f"plans: CHỈ kế hoạch / lời hẹn có thời điểm cụ thể (giờ hoặc buổi + ngày) mà phòng đã thống nhất. "
+                    f"Bây giờ là {_now_label_for_digest()}; quy đổi 'tối nay 9h', 'thứ 6 này 8h tối' ra 'YYYY-MM-DD HH:MM' giờ Việt Nam. "
+                    "Không chắc thời điểm thì bỏ qua. Tối đa 3 mục."
                 ),
             },
             {"role": "user", "content": transcript},
@@ -514,7 +568,7 @@ async def _summarize_conversation(transcript: str) -> str:
     )
     d = _parse_json_lenient(raw or "")
     if not d:
-        return ""
+        return "", []
 
     def _items(key: str, n: int) -> List[str]:
         v = d.get(key)
@@ -543,7 +597,51 @@ async def _summarize_conversation(transcript: str) -> str:
     mood = str(d.get("mood") or "").strip()
     if mood:
         out.append(f"Không khí: {mood[:240]}")
-    return _strip_stray_cjk("\n".join(out))[:2200]
+    durable: List[Dict[str, str]] = []
+    for item in (d.get("durable_facts") if isinstance(d.get("durable_facts"), list) else [])[:5]:
+        if isinstance(item, dict) and str(item.get("fact") or "").strip():
+            durable.append({
+                "who": _strip_stray_cjk(str(item.get("who") or "").strip())[:40],
+                "fact": _strip_stray_cjk(str(item.get("fact")).strip())[:200],
+            })
+    for item in (d.get("plans") if isinstance(d.get("plans"), list) else [])[:3]:
+        if isinstance(item, dict) and str(item.get("when") or "").strip() and str(item.get("what") or "").strip():
+            durable.append({
+                "kind": "plan",
+                "when": str(item.get("when")).strip()[:25],
+                "who": _strip_stray_cjk(str(item.get("who") or "").strip())[:40],
+                "fact": _strip_stray_cjk(str(item.get("what")).strip())[:160],
+            })
+    return _strip_stray_cjk("\n".join(out))[:2200], durable
+
+
+def _remember_durable_facts(room: Any, durable: List[Dict[str, str]], digest: str) -> None:
+    """Persist long-lived facts from the digest into member profiles / room memory (long-term memory)."""
+    from services.memory import memory_store
+
+    from services.memory import parse_vn_datetime
+
+    by_name = {(u.name or "").strip().lower(): u for u in list(getattr(room, "users", {}).values())}
+    for item in durable:
+        if item.get("kind") == "plan":
+            when_ts = parse_vn_datetime(item.get("when", ""))
+            if when_ts:
+                memory_store.add_plan(room.id, when_ts, item["fact"], who=item.get("who", ""))
+            continue
+        who = item["who"].strip().lower()
+        if who in ("phòng", "phong", "cả phòng", "ca phong", "room", ""):
+            memory_store.add_room_fact(room.id, item["fact"], who="")
+            continue
+        user = by_name.get(who)
+        if user is not None:
+            memory_store.add_profile_fact(getattr(user, "profile_id", ""), item["fact"], source="auto")
+        else:
+            # Member already left (or a nickname): keep it as room knowledge, attributed by name
+            memory_store.add_room_fact(room.id, f"{item['who']}: {item['fact']}", who=item["who"])
+    if digest:
+        # One short line per day for 'hôm qua phòng mình bàn gì' style questions
+        first_lines = [ln for ln in digest.splitlines() if ln.startswith(("Chủ đề", "Đã thống nhất"))]
+        memory_store.set_session_summary(room.id, " | ".join(first_lines)[:700] or digest[:500])
 
 
 async def refresh_conversation_digest(room: Any) -> None:
@@ -554,7 +652,8 @@ async def refresh_conversation_digest(room: Any) -> None:
     state = {"digest": "", "last_ts": _last_chat_ts(room.messages), "updated": time.time(), "msgs": convo["count"]}
     if convo["count"] >= DIGEST_MIN_MSGS:
         try:
-            state["digest"] = await _summarize_conversation(convo["text"])
+            state["digest"], durable = await _summarize_conversation(convo["text"])
+            _remember_durable_facts(room, durable, state["digest"])
         except Exception as exc:
             print(f"[ai digest err] {type(exc).__name__} {exc}")
             prev = _digest_state.get(room.id)
@@ -793,9 +892,26 @@ _FACT_CHECK_KEYWORDS = (
 )
 
 
+def _smart_truncate(text: str, limit: int) -> str:
+    """Shorten without cutting mid-word: prefer the last full sentence, else the last word + '…'."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    sentence_end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if sentence_end >= int(limit * 0.5):
+        return cut[: sentence_end + 1].strip()
+    space = cut.rfind(" ")
+    if space > 0:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-–—") + "…"
+
+
 def _tidy_reply(text: str) -> str:
     """Models sometimes double-escape newlines inside JSON (a literal backslash-n shows up in chat)."""
     t = str(text or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+    # gpt-oss likes narrow / no-break spaces and non-breaking hyphens: normalize for search, TTS & wrapping
+    t = re.sub(r"[     ]", " ", t).replace("‑", "-")
     t = re.sub(r"\n{3,}", "\n\n", t)
     return _strip_stray_cjk(t.strip())[:900]
 
@@ -1006,6 +1122,10 @@ async def chat_with_em_be_floor_2(
         "  Không hỏi lại điều đã có trong ngữ cảnh. Giữ nhất quán với những gì bạn đã nói trước đó; nếu trước đó bạn sai thì thừa nhận và sửa.\n"
         "  Ngữ cảnh chỉ để hiểu: chỉ khẳng định dữ kiện bạn chắc chắn, không chắc thì nói rõ, TUYỆT ĐỐI KHÔNG bịa dữ kiện. "
         "Không gợi ý bài hát nếu người dùng không xin nhạc.\n"
+        "- Bạn KHÔNG có khả năng tự thêm bài vào hàng đợi, xóa trí nhớ hay đặt lịch nhắc trong chế độ này. "
+        "Khi được nhờ, TUYỆT ĐỐI không nói là đã làm; hãy gợi ý bài và mời họ bấm nút '+ Thêm' bên dưới.\n"
+        "- Chế độ này KHÔNG tra cứu được nguồn: với drama / scandal / đời tư / dữ kiện cụ thể (năm, giải thưởng, ai sáng tác) về nghệ sĩ, "
+        "nói thật là Em bé đang không tra được nguồn lúc này, mời hỏi lại sau ít phút; TUYỆT ĐỐI không tự kể chi tiết hay tin đồn.\n"
         "- Giữ câu trả lời súc tích, dễ đọc trong khung chat, dùng 1–3 emoji vừa phải.\n"
         "- TRÌNH BÀY `reply` CÓ BỐ CỤC, KHÔNG viết dồn 1 đoạn dài (dùng ký tự xuống dòng \\n trong chuỗi JSON):\n"
         "  • Tán gẫu thường: 1–2 đoạn ngắn (mỗi đoạn 1–2 câu), các đoạn cách nhau bằng 1 dòng trống (\\n\\n).\n"
@@ -1173,14 +1293,14 @@ async def generate_ai_dj_playlist(
     vibe_note = "Set nhạc hit đang trending được Em bé floor 2 tuyển chọn riêng cho phòng mình nè ✨"
     if parsed:
         if isinstance(parsed.get("vibe_note"), str) and parsed["vibe_note"].strip():
-            vibe_note = _strip_stray_cjk(parsed["vibe_note"].strip())[:180]
+            vibe_note = _smart_truncate(_strip_stray_cjk(parsed["vibe_note"]), 220)
         if isinstance(parsed.get("songs"), list):
             for s in parsed["songs"][:ask_count]:
                 if isinstance(s, dict) and s.get("title"):
                     songs.append({
                         "title": _strip_stray_cjk(str(s.get("title", "")).strip())[:80],
                         "artist": _strip_stray_cjk(str(s.get("artist", "")).strip())[:60],
-                        "reason": _strip_stray_cjk(str(s.get("reason", "")).strip())[:110],
+                        "reason": _smart_truncate(_strip_stray_cjk(str(s.get("reason", ""))), 140),
                     })
     return {"vibe_note": vibe_note, "songs": songs}
 
@@ -1195,7 +1315,7 @@ async def analyze_room_vibe(room_context: str, cache_key: str) -> Dict[str, Any]
         f"Bạn là '{AI_BOT_NAME}', chuyên gia đọc vị gu âm nhạc của phòng Floor 2.\n"
         "Dựa vào bài đang phát, hàng đợi, lịch sử nghe và từng thành viên trong phòng, hãy phân tích tâm trạng & gu nhạc chung.\n"
         "LUÔN trả về JSON:\n"
-        '{"emoji": "🌙", "title": "Tên vibe 3-5 từ", "genres": [{"name": "Thể loại", "pct": 60}, {"name": "Thể loại 2", "pct": 40}], "summary": "1-2 câu nhận xét dí dỏm, tinh tế bằng tiếng Việt về gu nhạc phòng và nhắc khéo bài/thành viên nếu có."}'
+        '{"emoji": "🌙", "title": "Tên vibe 3-5 từ", "genres": [{"name": "Thể loại", "pct": 60}, {"name": "Thể loại 2", "pct": 40}], "summary": "1-2 câu nhận xét dí dỏm, tinh tế bằng tiếng Việt (TỐI ĐA 45 từ) về gu nhạc phòng và nhắc khéo bài/thành viên nếu có."}'
     )
 
     raw = await groq_chat(
@@ -1221,9 +1341,11 @@ async def analyze_room_vibe(room_context: str, cache_key: str) -> Dict[str, Any]
                 genres.append({"name": str(g["name"]).strip()[:24], "pct": pct})
         result = {
             "emoji": str(parsed.get("emoji") or "✨").strip()[:4],
-            "title": str(parsed.get("title")).strip()[:48],
+            "title": _smart_truncate(str(parsed.get("title")), 60),
             "genres": genres or [{"name": "Đa thể loại", "pct": 100}],
-            "summary": str(parsed.get("summary") or "Phòng đang có một vibe nghe nhạc rất riêng!").strip()[:240],
+            "summary": _smart_truncate(
+                str(parsed.get("summary") or "Phòng đang có một vibe nghe nhạc rất riêng!").replace("_", " "), 360
+            ),
         }
         vibe_cache.set(cache_key, result, ttl=300)
         return result
@@ -1400,6 +1522,72 @@ async def generate_mc_radio_script(
             return script[:260]
 
     return _fallback_mc_script(clean_t, author, adder)
+
+
+# ---- Proactive one-liners (welcome / skip streak / reminders) -------------------------------------
+_PROACTIVE_GUIDE = {
+    "welcome": (
+        "Chào một thành viên vừa vào phòng, gọi đúng tên, thân thiện như bạn quen. Nếu là người quay lại thì nhắc nhẹ 1 chi tiết từ trí nhớ "
+        "(gu nhạc / điều họ kể) cho thấy mình nhớ họ; nếu là người mới thì chào đón ấm áp. Kết bằng việc mời nghe bài được gợi ý (nêu tên bài)."
+    ),
+    "skip_streak": (
+        "Phòng vừa vote bỏ qua liên tiếp nhiều bài. Bình luận nhẹ nhàng, hài hước (không chê ai), đoán vui là phòng đang khó chiều, "
+        "rồi gợi ý đổi gió bằng bài được gợi ý (nêu tên bài)."
+    ),
+    "reminder": "Đến giờ hẹn của phòng. Nhắc cả phòng một cách hào hứng, nêu đúng việc đã hẹn và ai đề xuất nếu có.",
+}
+_PROACTIVE_FALLBACK = {
+    "welcome": "Chào {name} nha! Vào phòng là có nhạc liền, nghe thử {song} xem có hợp gu không nè 🎧",
+    "skip_streak": "Ơ phòng mình đang khó chiều ghê, qua bài liên tục luôn 😆 Đổi gió với {song} thử nha!",
+    "reminder": "⏰ Tới giờ rồi cả nhà ơi: {what}! Lên dây cót thôi 🎶",
+}
+
+
+async def generate_proactive_line(kind: str, info: Dict[str, str]) -> str:
+    """Short, natural Vietnamese line for a proactive bot message (Qwen, separate quota from the agent)."""
+    guide = _PROACTIVE_GUIDE.get(kind, "")
+    facts = "\n".join(f"- {k}: {v}" for k, v in info.items() if v)
+    raw = await groq_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    f"Bạn là '{AI_BOT_NAME}', thành viên AI dễ thương của phòng nghe nhạc Floor 2. {guide}\n"
+                    "Viết 1-2 câu tiếng Việt tự nhiên (tối đa 35 từ), 1-2 emoji, **in đậm** tên bài nếu có. "
+                    "Chỉ dùng thông tin được cho, không bịa. Không chữ Hán. Chỉ trả về lời nhắn."
+                ),
+            },
+            {"role": "user", "content": facts or "(không có thêm thông tin)"},
+        ],
+        temperature=0.9,
+        max_tokens=160,
+        model=PRIMARY_MODEL,
+    )
+    line = _tidy_reply(raw or "").strip().strip('"')
+    if len(line) >= 8:
+        return line[:320]
+    tpl = _PROACTIVE_FALLBACK.get(kind, "{what}")
+    return tpl.format(
+        name=info.get("tên") or "bạn",
+        song=f"**{info.get('bài gợi ý')}**" if info.get("bài gợi ý") else "một bài hợp gu",
+        what=info.get("việc đã hẹn") or "",
+    )
+
+
+_QUESTION_HINT_RE = re.compile(
+    r"(\?|\b(ai biết|có ai|ai nhớ|là gì|là ai|bài gì|bài nào|tên gì|sao vậy|tại sao|vì sao|thế nào|như nào|"
+    r"bao giờ|khi nào|ở đâu|mấy giờ|có phải|đúng không|phải không|hông|ko ta|không ta|không nhỉ|nhỉ|"
+    r"nào vậy|gì vậy|ai vậy|nào thế|gì thế|ai thế|nào ta|gì ta|ca sĩ nào|ai hát)\b)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_open_question(text: str) -> bool:
+    """A real question to the room (not a reaction / one-word message)."""
+    t = (text or "").strip()
+    if len(t) < 10 or len(t.split()) < 3:
+        return False
+    return bool(_QUESTION_HINT_RE.search(t))
 
 
 def _split_tts_chunks(text: str, max_len: int = 165) -> List[str]:
