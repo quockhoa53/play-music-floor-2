@@ -13,15 +13,17 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from services.ratelimit import estimate_tokens, rate_guard, retry_after_seconds
+from services.ratelimit import estimate_tokens, fit_to_budget, rate_guard, retry_after_seconds
 from services.safety import neutralize_untrusted
 from services.telemetry import telemetry
 from services.ai import (
     AI_BOT_NAME,
+    EM_BE_PERSONA,
     GROQ_API_URL,
     _match_candidates_in_text,
     _strip_stray_cjk,
@@ -37,9 +39,10 @@ AGENT_MODELS = (AGENT_MODEL, AGENT_FALLBACK_MODEL)
 AGENT_MAX_STEPS = 3            # up to 2 rounds of (parallel) tool calls + 1 forced answer
 AGENT_MAX_TOOL_RESULT_CHARS = 1400
 # Text-heavy tools need more room (two Wikipedia intros, a lyric excerpt)
-TOOL_RESULT_LIMITS = {"lookup_music_facts": 2700, "get_song_lyrics": 2200}
+TOOL_RESULT_LIMITS = {"lookup_music_facts": 2000, "get_song_lyrics": 2000}
 # Groq reserves prompt + max_tokens against the 8K tokens/min free-tier budget: keep max_tokens modest
 AGENT_MAX_TOKENS = 700
+AGENT_FACTS_MAX_TOKENS = 1000
 AGENT_MAX_RATE_LIMIT_WAIT = 10.0
 FINAL_ANSWER_NUDGE = (
     "[Hệ thống] Đã đủ thông tin từ công cụ. Trả lời người gửi NGAY bây giờ theo đúng quy tắc trình bày, "
@@ -169,7 +172,8 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Tên bài/nghệ sĩ/sự kiện"},
+                    "query": {"type": "string", "description": "CHỈ tên riêng: nghệ sĩ / bài / album / chương trình / thể loại"},
+                    "focus": {"type": "string", "description": "Điều cần tìm: 'năm sinh', 'album đầu tay', 'quán quân', 'gia đình'"},
                     "lang": {"type": "string", "enum": ["vi", "en"]},
                 },
                 "required": ["query"],
@@ -246,7 +250,10 @@ _SHORT_TOOL_DESC = {
     "get_trending_songs": "Bảng xếp hạng nhạc thịnh hành Việt Nam lúc này.",
     "get_related_songs": "Bài cùng gu với một bài. video_id='current' = bài đang phát.",
     "get_song_lyrics": "Lời bài hát. video_id='current' = bài đang phát.",
-    "lookup_music_facts": "Tra Wikipedia để kiểm chứng dữ kiện âm nhạc.",
+    "lookup_music_facts": (
+        "Bách khoa Wikipedia: trang của 1 thực thể (nghệ sĩ, bài, album, chương trình, thể loại). "
+        "query = CHỈ tên riêng ('Đen Vâu', 'Rap Việt (mùa 1)', 'city pop'); focus = điều cần tìm ('album đầu tay', 'quán quân')."
+    ),
     "lookup_artist_drama": "Drama / tranh cãi / đời tư công khai của nghệ sĩ (mục Wikipedia, có nguồn).",
     "schedule_reminder": "Hẹn giờ để Em bé nhắc cả phòng. when='YYYY-MM-DD HH:MM' giờ VN.",
     "remember_fact": "Ghi nhớ lâu dài điều về người gửi ('me') hoặc cả phòng ('room'). Không lưu thông tin nhạy cảm.",
@@ -258,6 +265,15 @@ for _t in AGENT_TOOLS:
     _fn["description"] = _SHORT_TOOL_DESC.get(_fn["name"], _fn["description"])
     for _prop in (_fn.get("parameters", {}).get("properties") or {}).values():
         _prop.pop("description", None)
+# 'bài (hiện tại / đang phát / này) ai hát / tên gì / ai thêm': answered from the room state, not Wikipedia
+ROOM_ANSWERABLE_RE = re.compile(
+    r"(bài|bài hát|ca khúc|nhạc)( hiện tại| đang phát| đang mở| này| đang nghe)?\b.{0,25}"
+    r"(ai hát|ca sĩ nào|của ai|ai trình bày|tên (gì|là gì)|là bài gì|bài gì|ai (thêm|mở|bật|chọn))"
+    r"|(ai hát|ca sĩ nào hát|ai (thêm|mở|bật)) (bài|bài hát|ca khúc) (này|hiện tại|đang phát)",
+    re.IGNORECASE,
+)
+# Intent families whose first round MUST call a lookup tool (the model otherwise answers from memory and guesses)
+LOOKUP_INTENTS = {"facts", "drama"}
 
 
 TOOL_STATUS_TEXT = {
@@ -265,10 +281,10 @@ TOOL_STATUS_TEXT = {
     "get_trending_songs": "đang xem bảng xếp hạng",
     "get_related_songs": "đang tìm bài cùng gu",
     "get_song_lyrics": "đang đọc lời bài hát",
-    "lookup_music_facts": "đang tra cứu Wikipedia",
+    "lookup_music_facts": "đang tìm trên Internet",
     "add_song_to_queue": "đang thêm bài vào hàng đợi",
     "remember_fact": "đang ghi nhớ",
-    "lookup_artist_drama": "đang hóng drama trên Wikipedia",
+    "lookup_artist_drama": "đang hóng drama trên Internet",
     "schedule_reminder": "đang đặt lịch nhắc",
     "forget_my_memory": "đang xóa trí nhớ",
 }
@@ -295,7 +311,19 @@ INTENT_PATTERNS: Dict[str, re.Pattern] = {
     "facts": re.compile(
         r"(năm nào|ra năm|phát hành|ra mắt|ai hát|ai sáng tác|sáng tác|nhạc sĩ|album nào|thuộc album|giải thưởng|giải gì|kỷ lục|"
         r"confirm|xác nhận|ai đúng|ai sai|đúng không|phải không|có phải|kiểm chứng|tiểu sử|bao nhiêu tuổi|sinh năm|quê ở|thật không|"
-        r"thông tin|là ai|là người|giới thiệu về|kể về|biết gì về|sự nghiệp|nổi tiếng nhờ|tên thật|chiều cao)",
+        r"thông ti[nm]|thong tin|là ai|là người|giới thiệu về|kể về|biết gì về|sự nghiệp|nổi tiếng nhờ|tên thật|chiều cao|"
+        r"(về|của) (ca sĩ|nghệ sĩ|ca sỹ|rapper|ban nhạc|nhóm nhạc|nhạc sĩ)|"
+        r"(ca sĩ|nghệ sĩ|ca sỹ|rapper|ban nhạc|nhóm nhạc) (này|đó|kia|trong bài|của bài|hát bài|đang hát|là)|"
+        # encyclopedia questions: discography, genres, shows, history, relations, records
+        r"album (đầu tay|đầu tiên|mới nhất|thứ|nào|gì|tên)|đĩa đơn|\bep (đầu|nào)|thể loại|dòng nhạc|\bgenre\b|"
+        r"phong cách (âm nhạc|nhạc|hát)|(nguồn gốc|lịch sử|ra đời|xuất phát|bắt nguồn) (của )?(nhạc|dòng nhạc|thể loại|rap|kpop|vpop|bài|ban)|"
+        r"vô địch|quán quân|á quân|thắng giải|đề cử|mùa \d|\bseason \d|"
+        r"giám khảo|huấn luyện viên|\bhlv\b|thành viên (nhóm|ban|của)|tan rã|\bdebut\b|mối quan hệ|quan hệ (gì|thế nào|ra sao)|"
+        r"(là )?chị em|(là )?anh em ruột|(bố|mẹ|ba|vợ|chồng) (của|là) (ca sĩ|nghệ sĩ|rapper)|gia đình (của|ca sĩ|nghệ sĩ)|"
+        r"(hợp tác|kết hợp|collab|song ca) (với|cùng)|"
+        r"bao nhiêu (bài|album|giải|lượt xem|năm hoạt động)|lượt xem|bảng xếp hạng|\bbillboard\b|\bgrammy\b|cống hiến|làn sóng xanh|"
+        r"hãng đĩa|công ty quản lý|nhà sản xuất (âm nhạc|bài)|\bproducer\b|sinh ngày|ngày sinh|"
+        r"(bài|album|mv|ca khúc)( này| đó)? ra (khi nào|bao giờ|lúc nào))",
         re.IGNORECASE,
     ),
     "drama": re.compile(
@@ -304,7 +332,9 @@ INTENT_PATTERNS: Dict[str, re.Pattern] = {
         re.IGNORECASE,
     ),
     "lyrics": re.compile(
-        r"(lời bài|lời hát|câu (đầu|hát|này|cuối|đó)|nghĩa là gì|ý nghĩa|lyrics|hát (gì|về gì)|nói về (gì|điều gì))",
+        r"(lời bài|lời hát|câu (đầu|hát|này|cuối|đó)|nghĩa là gì|ý nghĩa|lyrics|hát (gì|về gì)|"
+        r"nói về (gì|điều gì|cái gì|chuyện gì|ai)|nội dung|thông điệp|kể về (chuyện|câu chuyện|điều)|"
+        r"(bài|bài hát|ca khúc)( này| hiện tại| đang phát| đó)? (buồn|vui) (vì|không|hả)|muốn nói (gì|điều gì))",
         re.IGNORECASE,
     ),
     "memory": re.compile(r"(nhớ (giùm|giúp|hộ|nha|là|rằng|dùm)|ghi nhớ|lưu lại|\bquên\b|xóa (trí nhớ|dữ liệu))", re.IGNORECASE),
@@ -321,10 +351,44 @@ TOOLS_BY_INTENT: Dict[str, set] = {
 }
 
 
+# ---------------------------------------------------------------------------------------------------
+# Unaccented typing ('thong tin ca si nay', 'goi y nhac buon'): a folded copy of every pattern runs on the
+# folded message. Only used when the message has NO diacritics, so accented messages keep the precise
+# patterns above. Families whose short words collide once folded ('nhắc'/'nhạc', 'bật'/'bắt',
+# 'quên'/'quen', 'cưới'/'cười') get hand-written unaccented patterns instead of the automatic fold.
+# ---------------------------------------------------------------------------------------------------
+_VN_DIACRITIC_RE = re.compile(r"[^\x00-\x7f]")
+
+
+def fold_vn(text: str) -> str:
+    """Lowercase + strip Vietnamese diacritics ('Thông tin Ca sĩ' -> 'thong tin ca si'). Keeps punctuation."""
+    s = unicodedata.normalize("NFD", (text or "").lower()).replace("đ", "d")
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+
+
+_FOLDED_OVERRIDES: Dict[str, str] = {
+    "add": r"(\b(mo|them|bat|phat|cho|xep) (bai|nhac|vao hang doi|vao queue|giup|gium|dum|ho)\b|"
+    r"\bxep hang\b|\bqueue\b|\bplay\b|\badd\b)",
+    "memory": r"(\bnho (gium|giup|ho|dum|nha|rang)\b|\bghi nho\b|\bluu lai\b|\bquen (het|di|giup|gium|dum|ho)\b|"
+    r"\bxoa (tri nho|du lieu)\b)",
+    "remind": r"(\bnhac (tui|toi|minh|ca phong|em|anh|gium|giup|dum|ho|lai)\b|\bhen gio\b|\bdat lich\b|\bremind\b|"
+    r"\bbao thuc\b|\bbao (gium|giup|cho) (tui|minh|ca phong)\b)",
+    "drama": fold_vn(INTENT_PATTERNS["drama"].pattern)
+    .replace("|cuoi|", "|dam cuoi|cuoi (vo|chong|nhau|ai)|")
+    .replace("|co con)", "|co con chua|co con (trai|gai))"),
+}
+FOLDED_INTENT_PATTERNS: Dict[str, re.Pattern] = {
+    name: re.compile(_FOLDED_OVERRIDES.get(name) or fold_vn(pat.pattern), re.IGNORECASE)
+    for name, pat in INTENT_PATTERNS.items()
+}
+
+
 # A question that names someone / something (capitalized word not at the start, e.g. 'Quân AP', 'Sơn Tùng')
 # is almost always an information request -> worth the agent's lookup tools.
 _PROPER_NOUN_RE = re.compile(r"(?<!^)(?<![.!?]\s)\b[A-ZĐÂĂÊÔƠƯÁÀẢÃẠÉÈẺẼẸÍÌỈĨỊÓÒỎÕỌÚÙỦŨỤÝỲỶỸỴ][\w'.-]+")
-_QUESTION_RE = re.compile(r"\?|\b(gì|nào|sao|ai|không|chưa|hả|nhỉ|vậy|thế)\s*[?!.]*\s*$", re.IGNORECASE)
+_QUESTION_RE = re.compile(
+    r"\?|\b(gì|nào|sao|ai|không|chưa|hả|nhỉ|vậy|thế|gi|nao|khong|chua|ha|nhi|vay|the)\s*[?!.]*\s*$", re.IGNORECASE
+)
 
 
 def detect_intents(text: str, ignore_names: Optional[List[str]] = None) -> set:
@@ -335,6 +399,17 @@ def detect_intents(text: str, ignore_names: Optional[List[str]] = None) -> set:
     """
     t = (text or "").strip()
     found = {name for name, pat in INTENT_PATTERNS.items() if pat.search(t)}
+    if not _VN_DIACRITIC_RE.search(t):
+        ft = fold_vn(t)
+        found |= {name for name, pat in FOLDED_INTENT_PATTERNS.items() if pat.search(ft)}
+    # Queue changes need an explicit command; 'cho anh thêm vài bài của X' is a suggestion request
+    from services.safety import wants_queue_add, _SUGGEST_RE
+
+    found.discard("add")
+    if wants_queue_add(t):
+        found.add("add")
+    elif _SUGGEST_RE.search(t) or re.search(r"(bài|bài hát|ca khúc|nhạc) (hát )?của", t, re.IGNORECASE):
+        found.add("music")
     if is_fact_check_request(t):
         found.add("facts")
     if not found and _QUESTION_RE.search(t):
@@ -364,17 +439,30 @@ _TOOL_RULES = {
         "(tối đa 3, đúng thứ tự, chỉ id từ kết quả công cụ; không nhắc id trong lời).\n"
     ),
     "add": (
-        "- add_song_to_queue: CHỈ khi người gửi yêu cầu rõ (mở/thêm/phát...), tối đa 3 bài; báo đúng kết quả, kể cả khi bị từ chối do quyền. "
-        "Chỉ nêu ca sĩ / thể loại mà không nêu tên bài (vd 'thêm 2 bài của Đen') thì TỰ search_songs rồi chọn các bài nổi tiếng nhất "
-        "(nhiều lượt xem) để thêm luôn, KHÔNG hỏi lại.\n"
+        "- add_song_to_queue: CHỈ khi người gửi RA LỆNH rõ đưa bài vào hàng đợi ('mở / phát / bật bài X', "
+        "'thêm bài X vào hàng đợi', 'thêm bài <Tên bài>'), đúng số bài họ nói (tối đa 3); báo đúng kết quả, kể cả khi bị từ chối do quyền. "
+        "Chỉ nêu ca sĩ ('mở 2 bài của Đen') thì search_songs rồi thêm các bài nổi tiếng nhất. "
+        "'Cho anh thêm vài bài của X', 'thêm mấy bài nữa', 'có bài nào của X' là XIN GỢI Ý: KHÔNG thêm, gợi ý kèm <cards> để họ tự bấm '+ Thêm'.\n"
     ),
     "facts": (
-        "- Dữ kiện (năm, sáng tác, album, giải, ai hát...): tra lookup_music_facts trước khi khẳng định, nói 'theo Wikipedia'. "
-        "Năm / ngày / con số CHỈ nêu khi có nguyên văn trong kết quả. Không tra được thì nói không chắc, không bịa.\n"
+        "- BÁCH KHOA ÂM NHẠC: mọi câu hỏi kiến thức (tiểu sử, năm sinh, gia đình, album, bài hát, sáng tác, giải thưởng, chương trình, "
+        "quán quân, thể loại, lịch sử, quan hệ giữa nghệ sĩ...) PHẢI lookup_music_facts trước, kể cả khi nghĩ là đã biết. "
+        "Bài đang phát / ai hát bài này / ai thêm bài: đọc NGAY dòng bài đang phát trong <room_context> (đó là sự thật), "
+        "không cần tra; muốn kể thêm về ca sĩ thì tra đúng tên ca sĩ đó. "
+        "query = tên riêng (bài đang phát thì lấy tên ca sĩ / tên bài trong <room_context>, KHÔNG BAO GIỜ query 'bài hát hiện tại'), "
+        "focus = điều được hỏi, viết TIẾNG VIỆT. Kết quả tra nói về bài / người KHÁC bài đang phát thì bỏ qua kết quả đó. "
+        "Câu hỏi về 2 người / quan hệ: tra CẢ HAI cùng lúc, focus = tên người kia. Kết quả lệch đề thì tra lại 1 lần với tên khác / lang='en'.\n"
+        "- CHỈ khẳng định điều có trong kết quả (năm / ngày / con số / tên phải có nguyên văn), lồng 'Em tìm trên Internet thì...' / 'theo Internet' MỘT lần thôi, tự nhiên trong câu (KHÔNG lặp mỗi dòng, KHÔNG BAO GIỜ nhắc chữ 'Wikipedia' / 'wiki'). "
+        "Có 'same_name' / 'warning' = trùng tên: đối chiếu với bài hát, người liên quan; không chắc đúng người thì nói rõ. "
+        "Không có nguồn thì nói thật là chưa tìm thấy thông tin trên Internet, KHÔNG đoán, không nói 'không có quan hệ' khi nguồn không nói vậy.\n"
+        "- Trả lời như cô em mê nhạc biết tuốt đang buôn chuyện: câu đầu trả lời thẳng ý hỏi (kèm 1 câu đùa / cà khịa nhẹ), "
+        "sau đó 2–4 ý bối cảnh thú vị từ nguồn kể kiểu tám chuyện "
+        "('- ' mỗi ý), không chèn gợi ý nhạc nếu không được hỏi. Gọi nghệ sĩ bằng TÊN ('Phương Ly là em gái của Phương Linh'); "
+        "'Em' / 'Em bé' CHỈ là bạn, không bao giờ chỉ nghệ sĩ. Giữ đúng ai làm gì như nguồn ghi.\n"
         "- Tranh luận: tóm tắt ý từng người theo tên rồi '**Kết luận:** ...' (đúng / sai / đúng một phần) kèm lý do, trung lập.\n"
     ),
     "drama": (
-        "- Drama nghệ sĩ: BẮT BUỘC lookup_artist_drama; kể vui nhưng CHỈ điều nguồn ghi, nói 'theo Wikipedia', từ trung lập "
+        "- Drama nghệ sĩ: BẮT BUỘC lookup_artist_drama; kể vui nhưng CHỈ điều nguồn ghi, nói 'theo thông tin trên Internet' (không nhắc 'Wikipedia'), từ trung lập "
         "('từng vướng', 'bị cho là'), nêu phản hồi của nghệ sĩ nếu có; không tin đồn, không kết luận ai có tội. "
         "Chuyện tình dục / ảnh, clip riêng tư bị phát tán / sức khỏe / con cái: chỉ nhắc chung 1 câu.\n"
     ),
@@ -389,8 +477,8 @@ def build_agent_system_prompt(intents: Optional[set] = None) -> str:
     intents = set(intents) if intents is not None else set(_TOOL_RULES)
     rules = "".join(_TOOL_RULES[i] for i in ("music", "add", "facts", "drama", "lyrics", "memory", "remind") if i in intents)
     return (
-        f"Bạn là '{AI_BOT_NAME}' 🎀, thành viên AI dễ thương, lanh lợi của phòng nghe nhạc Floor 2; xưng 'mình' / 'Em bé', gọi tên thành viên.\n"
-        "Tiếng Việt tự nhiên, dí dỏm vừa phải, 1–3 emoji, không chữ Hán. Ngắn gọn, đoạn ngắn cách dòng, liệt kê bằng '- ', "
+        f"Bạn là '{AI_BOT_NAME}' 🎀, thành viên AI của phòng nghe nhạc Floor 2.\n{EM_BE_PERSONA}"
+        "Tiếng Việt tự nhiên, 1–3 emoji, không chữ Hán. Ngắn gọn, đoạn ngắn cách dòng, liệt kê bằng '- ', "
         "**in đậm** ý chính; không tiêu đề #, bảng, code block.\n"
         "NGỮ CẢNH: <room_context> có ngày giờ hiện tại, bài đang phát, hàng đợi, tóm tắt buổi trò chuyện, tin nhắn gần nhất (cả lời bạn) "
         "và trí nhớ dài hạn về từng người ('- [Tên]' chỉ nói về đúng người đó). Trả lời như người ngồi trong phòng từ đầu; "
@@ -412,7 +500,16 @@ def _trim_json(obj: Any, limit: int = AGENT_MAX_TOOL_RESULT_CHARS) -> str:
             if isinstance(obj.get(key), list):
                 trimmed = dict(obj)
                 items = list(obj[key])
-                while items and len(json.dumps({**trimmed, key: items}, ensure_ascii=False)) > limit:
+                while len(items) > 1 and len(json.dumps({**trimmed, key: items}, ensure_ascii=False)) > limit:
+                    items.pop()
+                # A single oversized item (one Wikipedia page): shorten its text instead of dropping it
+                if items and isinstance(items[0], dict) and isinstance(items[0].get("text"), str):
+                    over = len(json.dumps({**trimmed, key: items}, ensure_ascii=False)) - limit
+                    if over > 0:
+                        first = dict(items[0])
+                        first["text"] = first["text"][: max(200, len(first["text"]) - over - 20)] + "…"
+                        items[0] = first
+                elif items and len(json.dumps({**trimmed, key: items}, ensure_ascii=False)) > limit:
                     items.pop()
                 trimmed[key] = items
                 trimmed["truncated"] = True
@@ -427,12 +524,15 @@ async def _stream_completion(
     reasoning_effort: str,
     on_content: Optional[DeltaCallback],
     tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: str = "auto",
+    max_tokens: int = AGENT_MAX_TOKENS,
 ) -> Dict[str, Any]:
     """Streamed completion with key rotation; waits briefly on short rate limits before giving up."""
     for attempt in range(2):
         try:
             return await _stream_completion_once(
-                messages, use_tools=use_tools, reasoning_effort=reasoning_effort, on_content=on_content, tools=tools
+                messages, use_tools=use_tools, reasoning_effort=reasoning_effort, on_content=on_content, tools=tools,
+                tool_choice=tool_choice, max_tokens=max_tokens,
             )
         except _RateLimited as rl:
             telemetry.incr("agent.rate_limited")
@@ -456,6 +556,8 @@ async def _stream_completion_once(
     reasoning_effort: str,
     on_content: Optional[DeltaCallback],
     tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: str = "auto",
+    max_tokens: int = AGENT_MAX_TOKENS,
 ) -> Dict[str, Any]:
     """One streamed chat completion. Tries gpt-oss-120b then gpt-oss-20b (separate Groq quotas) on every key,
     skipping (key, model) pairs that are cooling down or over their client-side minute budget."""
@@ -469,16 +571,16 @@ async def _stream_completion_once(
         for key_idx, api_key in order:
             payload: Dict[str, Any] = {
                 "model": model_name,
-                "messages": messages,
+                "messages": fit_to_budget(messages, max_tokens, (tools or AGENT_TOOLS) if use_tools else None),
                 "temperature": 0.6,
-                "max_tokens": AGENT_MAX_TOKENS,
+                "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
                 "stream": True,
             }
             if use_tools:
                 payload["tools"] = tools or AGENT_TOOLS
-                payload["tool_choice"] = "auto"
-            est = estimate_tokens(messages, AGENT_MAX_TOKENS, payload.get("tools"))
+                payload["tool_choice"] = tool_choice
+            est = estimate_tokens(payload["messages"], max_tokens, payload.get("tools"))
             wait = rate_guard.check(key_idx, model_name, est)
             if wait > 0:
                 rate_guard.skipped_for_budget += 1
@@ -504,6 +606,9 @@ async def _stream_completion_once(
                     if resp.status_code != 200:
                         body = (await resp.aread()).decode("utf-8", "ignore")[:600]
                         last_err = f"HTTP {resp.status_code}: {body[:300]}"
+                        rate_guard.release(key_idx, model_name, est)  # nothing generated: no phantom usage
+                        if resp.status_code != 429:
+                            print(f"[agent {resp.status_code}] {model_name} key#{key_idx}: {body[:300]}")
                         if resp.status_code == 429:
                             # Quotas are per model: cool down exactly this (key, model) for Groq's retry-after
                             cool = retry_after_seconds(resp, body)
@@ -567,6 +672,8 @@ async def _stream_completion_once(
                 raise
             except Exception as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
+                if not emitted:
+                    rate_guard.release(key_idx, model_name, est)
                 if emitted:
                     # Text already reached users; retrying would duplicate it
                     raise AgentUnavailable(last_err)
@@ -650,11 +757,15 @@ async def run_em_be_agent(
     on_reset: Optional[Callable[[], Awaitable[None]]] = None,
     recent_lines: str = "",
     intents: Optional[set] = None,
+    ignore_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run the tool-using agent. Returns {reply, cards: [track dicts], tools_used: [...], steps}."""
     text_msg = (clean_message or user_message or "").strip() or "Chào Em bé floor 2!"
     anaphora = bool(ANAPHORA_RE.search(text_msg))
-    effort = "medium" if (is_fact_check_request(user_message) or anaphora) else "low"
+    needs_lookup = bool(set(intents or ()) & LOOKUP_INTENTS)
+    effort = "medium" if (is_fact_check_request(user_message) or anaphora or needs_lookup) else "low"
+    # Encyclopedia answers are longer and reasoning tokens count against max_tokens
+    answer_tokens = AGENT_FACTS_MAX_TOKENS if needs_lookup else AGENT_MAX_TOKENS
     allowed_names = tools_for_intents(intents) if intents else {t["function"]["name"] for t in AGENT_TOOLS}
     tools = [
         t for t in AGENT_TOOLS
@@ -689,12 +800,19 @@ async def run_em_be_agent(
         if last_step and step > 0:
             messages.append({"role": "user", "content": FINAL_ANSWER_NUDGE})
         try:
+            # Knowledge questions: the first round MUST call a lookup (else the model answers from memory and guesses)
+            # ...except questions about what is playing ('bài này ai hát'): the answer is in <room_context>
+            force_lookup = step == 0 and needs_lookup and not ROOM_ANSWERABLE_RE.search(text_msg) and any(
+                t["function"]["name"] in ("lookup_music_facts", "lookup_artist_drama") for t in tools
+            )
             result = await _stream_completion(
                 messages,
                 use_tools=not last_step,
                 reasoning_effort=effort,
                 on_content=stream_filter.feed if stream_filter else None,
                 tools=tools,
+                tool_choice="required" if force_lookup else "auto",
+                max_tokens=answer_tokens,
             )
         except _ToolUseFailed:
             telemetry.incr("agent.tool_use_failed")
@@ -767,20 +885,119 @@ async def run_em_be_agent(
             telemetry.timing(f"tool_ms.{call['name']}", (time.time() - t_tool) * 1000)
             return call, res
 
-        outcomes = await asyncio.gather(*(_run(c) for c in calls))
-        for call, res in outcomes:
-            tools_used.append(call["name"])
-            _collect_tracks(res, seen_tracks)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                # Tool results carry third-party text (YouTube titles, Wikipedia, lyrics): neutralize too
-                "content": neutralize_untrusted(
-                    _trim_json(_strip_private(res), TOOL_RESULT_LIMITS.get(call["name"], AGENT_MAX_TOOL_RESULT_CHARS))
-                ),
-            })
+        outcomes = list(await asyncio.gather(*(_run(c) for c in calls)))
+
+        def _append_results(items: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> None:
+            for call, res in items:
+                tools_used.append(call["name"])
+                _collect_tracks(res, seen_tracks)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    # Tool results carry third-party text (YouTube titles, Wikipedia, lyrics): neutralize too
+                    "content": neutralize_untrusted(
+                        _trim_json(_strip_private(res), TOOL_RESULT_LIMITS.get(call["name"], AGENT_MAX_TOOL_RESULT_CHARS))
+                    ),
+                })
+
+        _append_results(outcomes)
+        if step == 0 and needs_lookup:
+            # After the model's own results (message order must stay assistant -> its tool results)
+            extra = await _auto_lookup_missing(text_msg, outcomes, ignore_names, _run, messages, step)
+            _append_results(extra)
+            outcomes += extra
+            # Lookup found something: answer now. Every extra round re-sends the whole context (~4K tokens)
+            # and the free tier only has 8K tokens/min per key and model.
+            if any(_lookup_found(res) for call, res in outcomes if call.get("name") in LOOKUP_TOOLS):
+                force_answer = True
 
     raise AgentUnavailable("agent did not finish")
+
+
+LOOKUP_TOOLS = ("lookup_music_facts", "lookup_artist_drama")
+
+
+def _lookup_found(res: Any) -> bool:
+    return isinstance(res, dict) and bool(res.get("results") or res.get("mentions") or res.get("sections"))
+FACT_GROUNDING_NUDGE = (
+    "[Hệ thống] Câu trả lời vừa rồi có chi tiết KHÔNG có trong kết quả tra cứu (bị bịa): {items}. "
+    "Viết lại: dữ kiện CHỈ lấy từ kết quả công cụ ở trên, lặng lẽ BỎ các chi tiết kia (đừng liệt kê 'chưa tìm thấy X'). "
+    "GIỮ NGUYÊN giọng Em lầy lội, có câu đùa / cà khịa như trước. Không nhắc chữ 'Wikipedia', không xin lỗi, không nhắc tới hệ thống."
+)
+_YEAR_RE = re.compile(r"(?<!\d)(1[89]\d\d|20\d\d)(?!\d)")
+_QUOTED_RE = re.compile(r"[“\"]([^”\"\n]{2,60})[”\"]|(?<!\*)\*([^*\n]{2,60})\*(?!\*)")
+
+
+async def _auto_lookup_missing(
+    text_msg: str,
+    outcomes: List[Tuple[Dict[str, Any], Dict[str, Any]]],
+    ignore_names: Optional[List[str]],
+    run_call: Callable[[Dict[str, Any]], Awaitable[Tuple[Dict[str, Any], Dict[str, Any]]]],
+    messages: List[Dict[str, Any]],
+    step: int,
+) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """The question names someone the model did not look up ('quan hệ với ca sĩ Phương Ly' -> only 'Phương Linh'
+    was searched): look them up too, so relation answers see both articles. Appended as a synthetic tool round."""
+    from services.knowledge import extract_entities, same_entity
+
+    queried = []
+    for call, _ in outcomes:
+        if call.get("name") in LOOKUP_TOOLS:
+            try:
+                a = json.loads(call.get("arguments") or "{}")
+            except Exception:
+                a = {}
+            q = str(a.get("query") or a.get("artist") or "")
+            if q:
+                queried.append(q)
+    if not queried:
+        return []
+    missing = [
+        e for e in extract_entities(text_msg, (ignore_names or []) + [AI_BOT_NAME])
+        if not any(same_entity(e, q) for q in queried)
+    ][:2]
+    if not missing:
+        return []
+    extra_calls = [
+        {
+            "id": f"auto_{step}_{i}",
+            "name": "lookup_music_facts",
+            "arguments": json.dumps({"query": e, "focus": queried[0]}, ensure_ascii=False),
+        }
+        for i, e in enumerate(missing)
+    ]
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+            for c in extra_calls
+        ],
+    })
+    telemetry.incr("agent.auto_lookup")
+    return list(await asyncio.gather(*(run_call(c) for c in extra_calls)))
+
+
+def _unsupported_facts(reply: str, messages: List[Dict[str, Any]]) -> List[str]:
+    """Years and quoted names in the reply that appear nowhere in the tool results / question / room context."""
+    from services.knowledge import fold_text
+
+    sources = fold_text(" ".join(
+        str(m.get("content") or "") for m in messages if m.get("role") in ("tool", "user")
+    ))
+    bad: List[str] = []
+    for y in _YEAR_RE.findall(reply):
+        if y not in sources and y not in bad:
+            bad.append(y)
+    for m in _QUOTED_RE.finditer(reply):
+        name = (m.group(1) or m.group(2) or "").strip(" .,:;!?")
+        # Only names / titles (start with a capital or digit): lowercase quotes are usually jokes, not claims
+        if not name or not (name[0].isupper() or name[0].isdigit()):
+            continue
+        folded = fold_text(name)
+        if len(folded) >= 3 and folded not in sources and name not in bad:
+            bad.append(name)
+    return bad[:6]
 
 
 async def _finalize_grounded(
@@ -796,8 +1013,47 @@ async def _finalize_grounded(
     on_reset: Optional[Callable[[], Awaitable[None]]],
 ) -> Dict[str, Any]:
     """Finalize, but if a music answer names songs that are NOT in the tool results (hallucinated),
-    ask the model once to rewrite it using only real songs (and replace the live bubble)."""
+    ask the model once to rewrite it using only real songs (and replace the live bubble).
+    Knowledge answers get the same treatment for years / quoted names missing from the Wikipedia results."""
     out = _finalize(raw, seen_tracks, tools_used, steps, started)
+    if set(LOOKUP_TOOLS) & set(tools_used):
+        bad = _unsupported_facts(out["reply"], messages)
+        if bad:
+            # Cheap fix first: drop the bullet / side lines carrying the made-up detail (keeps the tone, 0 tokens).
+            # Only a wrong MAIN answer (first paragraph) is worth another full-context model call.
+            lines = out["reply"].split("\n")
+            head_end = next((i for i, ln in enumerate(lines) if not ln.strip()), len(lines))
+            head = "\n".join(lines[:head_end])
+            if not any(b in head for b in bad):
+                kept = [ln for ln in lines if not any(b in ln for b in bad)]
+                out["reply"] = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+                out["ungrounded_dropped"] = bad
+                telemetry.incr("agent.ungrounded_facts_dropped")
+                return out
+            telemetry.incr("agent.ungrounded_facts_rewrite")
+            telemetry.event("ungrounded_facts", items=bad[:4], log=False)
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": FACT_GROUNDING_NUDGE.format(items=", ".join(bad))})
+            if on_reset:
+                try:
+                    await on_reset()
+                except Exception:
+                    pass
+            retry_filter = _CardsStreamFilter(on_text) if on_text else None
+            try:
+                result = await _stream_completion(
+                    messages, use_tools=False, reasoning_effort=effort,
+                    on_content=retry_filter.feed if retry_filter else None,
+                    max_tokens=AGENT_FACTS_MAX_TOKENS,
+                )
+                if retry_filter:
+                    await retry_filter.flush()
+                fixed = _finalize(result["content"] or "", seen_tracks, tools_used, steps + 1, started)
+                fixed["ungrounded_fixed"] = bad
+                return fixed
+            except (_ToolUseFailed, AgentUnavailable):
+                # Bubble was reset: the caller re-sends the final text, so the original (flawed) reply still shows
+                return out
     used_music = bool(MUSIC_TOOLS & set(tools_used))
     listed = len(re.findall(r"^\s*[-•]\s*\*\*", out["reply"], re.MULTILINE))
     if out["cards"] or not used_music or not seen_tracks or listed < 1:

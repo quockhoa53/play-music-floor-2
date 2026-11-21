@@ -693,19 +693,26 @@ async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, A
     existing = _inflight_related.get(clean_id)
     if existing and not existing.done():
         try:
-            items = await existing
+            # shield: a client that aborts must not cancel the fetch other clients are waiting on
+            items = await asyncio.shield(existing)
             return items[:limit]
+        except asyncio.CancelledError:
+            raise
         except Exception:
             pass
 
-    task = asyncio.create_task(_fetch_related_innertube(clean_id, limit=max(20, limit)))
+    task = asyncio.create_task(_fetch_and_cache_related(clean_id, max(20, limit)))
     _inflight_related[clean_id] = task
-    try:
-        items = await task
-    finally:
-        if _inflight_related.get(clean_id) is task:
-            _inflight_related.pop(clean_id, None)
+    task.add_done_callback(
+        lambda t, k=clean_id: _inflight_related.pop(k, None) if _inflight_related.get(k) is t else None
+    )
+    items = await asyncio.shield(task)
+    return items[:limit]
 
+
+async def _fetch_and_cache_related(clean_id: str, limit: int) -> List[Dict[str, Any]]:
+    """Fetch + update caches; runs as its own task so it finishes even if the requesting client disconnects."""
+    items = await _fetch_related_innertube(clean_id, limit=limit)
     if not items:
         if len(_related_fail_until) > 500:
             now = time.time()
@@ -719,7 +726,7 @@ async def get_related_videos(video_id: str, limit: int = 14) -> List[Dict[str, A
             vid = it.get("id")
             if vid:
                 yt_info_cache.set(vid, it)
-    return items[:limit]
+    return items
 
 
 # ============================================================================

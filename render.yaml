@@ -38,8 +38,17 @@ services:
       - key: YT_PROXY
         sync: false
       # --- Em bé floor 2 (AI) ---
-      # Groq API keys (cách nhau bởi dấu phẩy). Nên dùng key từ 2 tổ chức Groq khác nhau để nhân đôi hạn mức free
+      # Groq API keys: hoặc GROQ_API_KEYS (cách nhau bởi dấu phẩy), hoặc mỗi key 1 biến GROQ_API_KEY_1.._20
+      # (dùng được cả 2, key trùng tự bỏ). Mỗi key nên ở 1 tổ chức Groq KHÁC NHAU: hạn mức free tính theo tổ chức
       - key: GROQ_API_KEYS
+        sync: false
+      - key: GROQ_API_KEY_1
+        sync: false
+      - key: GROQ_API_KEY_2
+        sync: false
+      - key: GROQ_API_KEY_3
+        sync: false
+      - key: GROQ_API_KEY_4
         sync: false
       # 1 = agent gpt-oss (công cụ, tra cứu, thêm bài); 0 = chỉ dùng pipeline Qwen cũ
       - key: AI_AGENT_ENABLED
@@ -47,9 +56,10 @@ services:
       # Phòng mới mặc định bật chế độ Em bé chủ động (chào người mới, nhắc lịch...). Host vẫn tắt được
       - key: AI_PROACTIVE_DEFAULT
         value: "1"
-      # Giây giữ thành viên trong phòng khi rớt kết nối (đổi tab / mạng chập chờn) trước khi tính là rời phòng
+      # Giây giữ thành viên khi rớt kết nối KHÔNG kèm lệnh rời (đổi tab, tab bị trình duyệt đóng băng, mạng chập chờn).
+      # Rời thật = bấm Rời phòng / đóng tab (gửi beacon). 21600 = 6 tiếng: chỉ dọn thiết bị biến mất (sập nguồn, crash)
       - key: LEAVE_GRACE_SEC
-        value: "300"
+        value: "21600"
       # Bí mật để băm định danh thiết bị -> profile trí nhớ. ĐẶT 1 LẦN, đổi về sau = mọi người mất trí nhớ AI
       - key: PROFILE_ID_PEPPER
         sync: false

@@ -3,6 +3,7 @@
 Run: python tests/smoke_test.py
 """
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -1407,7 +1408,7 @@ def test_em_be_agent_tool_loop_offline():
     # 2. Scripted model: round 1 calls search_songs; final answer lists 2 songs (+1 hallucinated id) in a shuffled cards line
     calls_seen = []
 
-    async def fake_stream(messages, *, use_tools, reasoning_effort, on_content, tools=None):
+    async def fake_stream(messages, *, use_tools, reasoning_effort, on_content, tools=None, **_kw):
         calls_seen.append(use_tools)
         if len(calls_seen) == 1:
             return {"content": "", "tool_calls": [{"id": "c1", "name": "search_songs", "arguments": '{"query":"rap việt"}'}], "finish_reason": "tool_calls"}
@@ -1596,6 +1597,52 @@ def test_proactive_vision_drama_and_reminders_offline():
     assert drama["found"] and [s["heading"] for s in drama["sections"]] == ["Tranh cãi"], drama
     assert "phủ nhận" in drama["sections"][0]["text"] and drama["url"].startswith("https://")
 
+    # 2b. Encyclopedia lookup: picks the paragraph that answers `focus`, withholds a same-name person's page
+    pages = {
+        "Ca Sĩ Bảo": (
+            "Ca Sĩ Bảo (sinh 1989) là rapper.\n\n== 2018–2019: Sự nghiệp ==\n" + ("Ra MV bóng đá rất dài. " * 40)
+            + "\nAnh ra mắt album đầu tay Dongvui harmony vào tháng 11.\n"
+        ),
+        "Linh X": "Linh X có thể là:\n\nCa sĩ Linh X (sinh 1984).\nXã Linh X.",
+        "Đàm Linh X": "Đàm Linh X (sinh 1993) là người mẫu, ca sĩ.\n\n== Đời tư ==\nKhông liên quan.",
+        "Em Gái Y": "Em Gái Y là ca sĩ.\n\n== Tiểu sử ==\nEm Gái Y sinh năm 1990, là em gái của ca sĩ Linh X.",
+    }
+
+    async def fake_titles2(lang, q, limit):
+        if lang != "vi":
+            return []
+        if "Ca Sĩ Bảo" in q:
+            return ["Ca Sĩ Bảo"]
+        if q.startswith('"Linh X"'):
+            return ["Đàm Linh X", "Em Gái Y"]
+        if "Linh X" in q:
+            return ["Đàm Linh X", "Linh X"]
+        return []
+
+    async def fake_extract2(lang, title):
+        return pages.get(title, "")
+
+    K._search_titles, K._full_extract = fake_titles2, fake_extract2
+    try:
+        album = asyncio.run(K.lookup_music_facts("Ca Sĩ Bảo", focus="album đầu tay"))
+        linh = asyncio.run(K.lookup_music_facts("Linh X", focus="năm sinh"))
+    finally:
+        K._search_titles, K._full_extract = orig_t, orig_e
+    assert "Dongvui harmony" in album["results"][0]["text"], album
+    assert linh["results"] == [] and "1993" not in json.dumps(linh.get("mentions", []), ensure_ascii=False), linh
+    assert linh["same_name"] == ["Ca sĩ Linh X (sinh 1984)."] and linh["other_person_same_name"]["title"] == "Đàm Linh X"
+    assert any("em gái của ca sĩ Linh X" in m["sentence"] for m in linh.get("mentions", [])), linh
+    assert list(linh)[0] == "warning", "warnings must come before the data"
+
+    # 2c. Grounding: years / quoted names absent from the sources are flagged; entities the model skipped are found
+    from services.agent import _unsupported_facts
+    from services.knowledge import extract_entities, same_entity
+    srcs = [{"role": "tool", "content": "album thu live đầu tay Dongvui harmony năm 2022"}, {"role": "user", "content": "album?"}]
+    assert _unsupported_facts("Album đầu tay là “Kobukovu” (2016), rồi *Dongvui harmony* 2022", srcs) == ["2016", "Kobukovu"]
+    assert extract_entities("có mối quan hệ gì với ca sĩ Phương Ly không?") == ["Phương Ly"]
+    assert extract_entities("Gấu hỏi Rap Việt mùa 1", ["Gấu"]) == ["Rap Việt"]
+    assert same_entity("Phương Ly", "Phương Ly (ca sĩ)") and not same_entity("Phương Linh", "Phương Ly")
+
     # 3. Room with proactive ON; stub the LLM line generator + agent reply (offline)
     room = M.Room("pro1", "Proactive Room", host_id="u1")
     room.ai_proactive = True
@@ -1754,6 +1801,13 @@ def test_prompt_injection_defenses_and_telemetry():
     # 3. Server-side gate: side effects only when the CURRENT message asks for them
     assert action_allowed("add_song_to_queue", "mở giùm bài Bigcityboi")
     assert not action_allowed("add_song_to_queue", "gợi ý vài bài rap đi")
+    # 'cho anh thêm (vài) bài của X' = show me songs (suggestion cards), never a silent queue add
+    assert not action_allowed("add_song_to_queue", "cho anh thêm những bài hát của Hiếu Thứ 2")
+    assert not action_allowed("add_song_to_queue", "thêm mấy bài nữa đi em")
+    assert action_allowed("add_song_to_queue", "thêm bài Ngủ Một Mình vào hàng đợi")
+    assert action_allowed("add_song_to_queue", "thêm bài Exit Sign")
+    assert action_allowed("add_song_to_queue", "mở 2 bài của Đen")
+    assert not action_allowed("add_song_to_queue", "mở nhạc gì giờ ta")
     assert action_allowed("forget_my_memory", "quên tui đi em")
     assert not action_allowed("forget_my_memory", "quên mất tiêu tên bài rồi")
 
@@ -1875,7 +1929,23 @@ def test_tab_switch_grace_period_and_explicit_leave():
         assert uid_m not in room.users
         assert left_events and left_events[0]["type"] == "user_left" and "đã rời phòng" in left_events[0]["message"]["text"]
 
-    print("[OK] Tab switch / network drop keeps the member (silent resume); explicit leave or grace expiry removes")
+        # 5. Tab closed while its socket was already cut (frozen background tab): the sendBeacon leave removes it
+        with client.websocket_connect(f"/ws/{rid}?token={tok_m}") as ws_m4:
+            ws_m4.send_json({"action": "join", "name": "Mèo"})
+            ws_m4.receive_json()
+            ws_m4.receive_json()
+            ws_h.receive_json()
+        _t.sleep(0.3)
+        assert uid_m in room.users and uid_m in room.pending_leaves
+        assert client.post(f"/api/rooms/{rid}/leave", json={"token": "bogus"}).status_code == 204
+        assert uid_m in room.users, "an invalid token must not remove anyone"
+        r = client.post(f"/api/rooms/{rid}/leave", json={"token": tok_m})
+        assert r.status_code == 204 and uid_m not in room.users and uid_m not in room.pending_leaves
+
+    # Default keeps a dropped member for hours: only an explicit leave (button / tab closed) removes quickly
+    assert M.LEAVE_GRACE_SEC >= 3600 or os.getenv("LEAVE_GRACE_SEC")
+
+    print("[OK] Tab switch / network drop keeps the member (silent resume); explicit leave, tab-close beacon or grace expiry removes")
 
 
 def test_agent_routing_and_quota_cooldown():
@@ -1888,6 +1958,14 @@ def test_agent_routing_and_quota_cooldown():
     assert detect_intents("confirm giùm ai đúng đi") == {"facts"}
     assert detect_intents("câu đầu bài đang phát nghĩa là gì") == {"lyrics"}
     assert detect_intents("mở giùm bài Bigcityboi") == {"add"}
+    # Unaccented typing + typos route the same way; folded collisions ('cười', 'bắt', 'quen') stay plain chat
+    assert detect_intents("Thông tim về ca sĩ trong bài này") == {"facts"}
+    assert detect_intents("thong tin ca si nay") == {"facts"}
+    assert detect_intents("goi y nhac buon di") == {"music"}
+    assert detect_intents("nhac tui 9h hop nhe") == {"remind"}
+    assert detect_intents("haha cuoi xiu") == set()
+    assert detect_intents("bat dau thoi") == set()
+    assert detect_intents("quen roi") == set()
     for chat in ("hôm nay ăn gì ta", "nãy Thỏ nói gì nhỉ", "chào em nha", "kể chuyện cười đi"):
         assert detect_intents(chat, ["Gấu", "Mèo", "Thỏ"]) == set(), chat
     # Real messages that used to be misrouted to plain chat (no tools -> made-up answers)

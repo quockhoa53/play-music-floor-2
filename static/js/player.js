@@ -163,11 +163,7 @@ class SyncPlayer {
         this.isReady = true;
         this.loadedVideoId = null;
         this.setVolume(this.volume);
-        if (this.isMuted && this.player.mute) {
-            this.player.mute();
-        } else if (this.player.unMute) {
-            this.player.unMute();
-        }
+        this._enforceMute();
 
         if (this.lastRoomState && this.lastRoomState.current_track) {
             this.syncWithRoomState(this.lastRoomState);
@@ -192,6 +188,7 @@ class SyncPlayer {
 
         const state = event.data;
         if (state === YT.PlayerState.PLAYING) {
+            this._enforceMute();  // a freshly loaded video must keep this member's mute
             this.autoplayBlocked = false;
             this.localPaused = false;
             this.setAutoplayBannerVisible(false);
@@ -308,9 +305,6 @@ class SyncPlayer {
 
         this.isSyncing = true;
         try {
-            if (!this.isMuted && this.player.unMute) {
-                this.player.unMute();
-            }
             this._applyEffectiveVolume();
             if (this.loadedVideoId !== this.currentTrack.id) {
                 this.loadedVideoId = this.currentTrack.id;
@@ -567,9 +561,15 @@ class SyncPlayer {
         return (this.currentTrack && Number(this.currentTrack.duration)) || 0;
     }
 
-    setVolume(val) {
+    setVolume(val, fromUser = false) {
         this.volume = Math.max(0, Math.min(100, parseInt(val, 10)));
         localStorage.setItem('floor2_volume', this.volume);
+        // Only the member dragging the slider up may lift THEIR mute; automatic calls (track change,
+        // MC ducking, player ready) must never unmute someone listening on the shared speaker.
+        if (fromUser && this.isMuted && this.volume > 0) {
+            this.isMuted = false;
+            localStorage.setItem('floor2_muted', 'false');
+        }
         this.updateVolumeSliderFill();
         this._applyEffectiveVolume();
     }
@@ -584,17 +584,23 @@ class SyncPlayer {
 
         if (this.audioEl) {
             this.audioEl.volume = effVol / 100;
-            if (this.isMuted && this.volume > 0) this.audioEl.muted = false;
+            this.audioEl.muted = this.isMuted;
         }
 
         if (this.isReady && this.player && typeof this.player.setVolume === 'function') {
             this.player.setVolume(effVol);
-            if (this.isMuted && this.volume > 0) {
-                this.player.unMute();
-                this.isMuted = false;
-                localStorage.setItem('floor2_muted', 'false');
-            }
+            // Re-assert the member's own mute choice (YouTube may reset it when a new video loads)
+            this._enforceMute();
         }
+    }
+
+    _enforceMute() {
+        if (!this.isReady || !this.player) return;
+        try {
+            const ytMuted = typeof this.player.isMuted === 'function' ? this.player.isMuted() : null;
+            if (this.isMuted && ytMuted !== true && this.player.mute) this.player.mute();
+            if (!this.isMuted && ytMuted !== false && this.player.unMute) this.player.unMute();
+        } catch (_) {}
     }
 
     updateVolumeSliderFill() {

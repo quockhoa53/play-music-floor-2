@@ -15,7 +15,7 @@ import httpx
 
 from services.cache import TTLCache
 from services.telemetry import telemetry
-from services.ratelimit import estimate_tokens, rate_guard, retry_after_seconds
+from services.ratelimit import estimate_tokens, fit_to_budget, rate_guard, retry_after_seconds
 
 AI_BOT_ID = "ai_em_be_floor_2"
 AI_BOT_NAME = "Em bé floor 2"
@@ -59,7 +59,9 @@ class GroqKeyRotator:
 
     def reload_keys(self) -> List[str]:
         raw_parts: List[str] = []
-        for env_name in ("GROQ_API_KEYS", "GROD", "GROQ_API_KEY", "GROQ_API_KEY_1", "GROQ_API_KEY_2"):
+        # One combined list and/or one variable per key (GROQ_API_KEY_1 ... _20): duplicates are removed below
+        env_names = ["GROQ_API_KEYS", "GROD", "GROQ_API_KEY"] + [f"GROQ_API_KEY_{i}" for i in range(1, 21)]
+        for env_name in env_names:
             val = os.getenv(env_name, "").strip()
             if val:
                 raw_parts.extend(re.split(r"[\s,;]+", val))
@@ -220,16 +222,22 @@ async def groq_chat(
         for m_name in models_to_try:
             for key_idx, api_key in order:
                 req_max = max_tokens if m_name == PRIMARY_MODEL else max(max_tokens, 600)
+                # Groq rejects (413) any request above 8K tokens/min: trim the room context to fit
+                fitted = fit_to_budget(messages, req_max)
                 payload: Dict[str, Any] = {
                     "model": m_name,
-                    "messages": messages,
+                    "messages": fitted,
                     "temperature": temperature,
                     "max_tokens": req_max,
                 }
                 if json_mode:
                     payload["response_format"] = {"type": "json_object"}
+                if m_name.startswith("openai/gpt-oss"):
+                    # Hidden reasoning counts against max_tokens: at the default effort a long chat prompt used
+                    # all of it and Groq returned json_validate_failed with an EMPTY generation
+                    payload["reasoning_effort"] = "low"
 
-                est = estimate_tokens(messages, req_max)
+                est = estimate_tokens(fitted, req_max)
                 wait = rate_guard.check(key_idx, m_name, est)
                 if wait > 0:
                     rate_guard.skipped_for_budget += 1
@@ -251,11 +259,23 @@ async def groq_chat(
 
                     if resp.status_code == 200:
                         data = resp.json()
-                        rate_guard.settle(key_idx, m_name, est, (data.get("usage") or {}).get("total_tokens"))
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        usage = data.get("usage") or {}
+                        rate_guard.settle(key_idx, m_name, est, usage.get("total_tokens"))
+                        choice = data.get("choices", [{}])[0]
+                        content = choice.get("message", {}).get("content", "") or ""
                         cleaned = _clean_model_text(content)
                         if cleaned:
                             return cleaned
+                        print(
+                            f"[groq empty] {m_name} key#{key_idx} finish={choice.get('finish_reason')} "
+                            f"prompt={usage.get('prompt_tokens')} completion={usage.get('completion_tokens')} "
+                            f"raw_len={len(content)} head={content[:120]!r}"
+                        )
+                        telemetry.incr(f"groq.{m_name}.empty")
+                        continue
+                    rate_guard.release(key_idx, m_name, est)
+                    if resp.status_code not in (200, 429):
+                        print(f"[groq {resp.status_code}] {m_name} key#{key_idx}: {resp.text[:300]}")
                     elif resp.status_code == 429:
                         # Quotas are per model: cool down only this (key, model), for exactly as long as Groq says
                         body = resp.text[:400]
@@ -282,7 +302,8 @@ async def groq_chat(
                             telemetry.event("groq_400", model=m_name, body=resp.text[:200])
                         continue
                 except Exception as exc:
-                    print(f"[ai groq err key#{key_idx} model={m_name}] {exc}")
+                    rate_guard.release(key_idx, m_name, est)
+                    print(f"[ai groq err key#{key_idx} model={m_name}] {type(exc).__name__} {exc}")
                     telemetry.incr(f"groq.{m_name}.exception")
                     continue
         # Everything was over budget for a few seconds only: wait once instead of failing the reply
@@ -880,10 +901,23 @@ def catalog_songs_for_mood(mood: str) -> List[Dict[str, str]]:
     return [{"title": t, "artist": a, "reason": reason} for t, a in grp["songs"]]
 
 
+# Asking FOR songs (suggest / find / mood). Bare 'bai', 'nhac', 'ca si' are NOT here: 'bài này ai hát' or
+# 'lời bài nói gì' are questions about a song, and treating them as requests cost an extra planner LLM call,
+# a YouTube search and the whole hit catalog in the prompt on almost every message.
 _MUSIC_REQ_KEYWORDS = (
-    "nhac", "bai", "rap", "hip hop", "hiphop", "kpop", "k pop", "us uk", "au my", "ballad", "edm", "indie",
-    "bolero", "lofi", "remix", "playlist", "goi y", "nghe gi", "song", "music", "mood", "tam trang",
-    "buon", "chill", "quay", "thu gian", "co don", "that tinh", "ca si", "hit", "trending", "giai dieu",
+    "goi y", "de xuat", "recommend", "nghe gi", "bai nao", "bai gi hay", "xin bai", "xin vai", "xin may",
+    "vai bai", "may bai", "tim bai", "tim nhac", "tim giup bai", "kiem bai", "kiem nhac", "playlist", "hop gu",
+    "hop tam trang", "hop luc nay", "nhac buon", "nhac vui", "nhac chill", "nhac rap", "nhac gi", "nhac nao",
+    "nhac de", "nhac cho", "nhac hay", "bai hay", "bai moi", "bai hot", "trending", "dang hot", "thinh hanh",
+    "bai hat cua", "bai cua", "nhac cua", "ca khuc cua", "nhung bai", "cac bai", "list bai",
+    "rap", "hip hop", "hiphop", "kpop", "k pop", "us uk", "au my", "ballad", "edm", "indie", "bolero", "lofi",
+    "remix", "mood", "tam trang", "buon", "chill", "quay", "thu gian", "co don", "that tinh",
+)
+# Questions ABOUT a song / artist (answered from context or the encyclopedia), never a suggestion request
+_SONG_QUESTION_KEYWORDS = (
+    "ai hat", "ca si nao", "cua ai", "ten gi", "ten bai", "loi bai", "loi hat", "noi ve", "y nghia", "noi dung",
+    "sinh nam", "thong tin", "la ai", "vo dich", "quan quan", "album", "nam nao", "phat hanh", "ai them",
+    "ai sang tac", "the loai gi", "la the loai",
 )
 
 
@@ -915,7 +949,57 @@ def _tidy_reply(text: str) -> str:
     # gpt-oss likes narrow / no-break spaces and non-breaking hyphens: normalize for search, TTS & wrapping
     t = re.sub(r"[     ]", " ", t).replace("‑", "-")
     t = re.sub(r"\n{3,}", "\n\n", t)
+    t = hide_source_brand(t)
+    t = fix_self_pronoun(t)
+    # Models sometimes prefix lines with the speaker label ('Em bé: ...', 'Em bé floor 2: ...'): the bubble already says who
+    t = re.sub(r"(?im)^[ \t]*(?:🎤\s*)?em bé(?: floor ?2)?\s*:\s*", "", t)
     return _strip_stray_cjk(t.strip())[:900]
+
+
+# 'mình' as the bot's own subject ('mình nghĩ', 'nên mình chia sẻ') -> 'Em'. 'phòng mình' / 'tụi mình' are untouched.
+_SELF_VERBS = (
+    r"(nghĩ|thấy|tìm|kể|nói|trả lời|biết|gợi ý|chia sẻ|đề xuất|nhớ|hiểu|xin|mời|chọn|thêm|mở|đoán|tra|đọc|nghe|"
+    r"cũng|sẽ|đã|đang|vừa|chưa|không|khum|rất|thích|ghét|cá là|hứa|nhắc|đây|nè)"
+)
+_SELF_PRONOUN_RE = re.compile(rf"(^|[.!?…\n]\s*|\b(?:nên|để|thì|giờ|vậy|nhưng|và|rồi|là)\s+)[Mm]ình\s+{_SELF_VERBS}\b")
+
+
+def fix_self_pronoun(text: str) -> str:
+    """The bot always says 'Em'; smaller fallback models sometimes slip back to 'mình'."""
+    if "ình" not in (text or ""):
+        return text
+
+    return _SELF_PRONOUN_RE.sub(lambda m: f"{m.group(1)}Em {m.group(2)}", text)
+
+
+_WIKI_URL_RE = re.compile(r"\(?\s*https?://[a-z.]*wikipedia\.org/\S*\s*\)?", re.IGNORECASE)
+_WIKI_PHRASE_RE = re.compile(
+    r"\b(theo|trên|từ|dựa (trên|theo)|nguồn|tra|tìm( trên)?)\s+(trang\s+)?(wikipedia|wiki)(\s+tiếng\s+(việt|anh))?\b",
+    re.IGNORECASE,
+)
+
+
+def hide_source_brand(text: str) -> str:
+    """Facts come from Wikipedia, but saying 'theo Wikipedia' sounds cheap in chat: present it as 'Internet'."""
+    if "wiki" not in (text or "").lower():
+        return text
+
+    def _phrase(m: "re.Match") -> str:
+        lead = m.group(1).lower()
+        if lead == "theo" or lead.startswith("dựa"):
+            return f"{m.group(1)} thông tin trên Internet"
+        if lead == "nguồn":
+            return f"{m.group(1)} trên Internet"
+        return f"{m.group(1)} trên Internet" if lead in ("tra", "tìm") else f"{m.group(1)} Internet"
+
+    t = _WIKI_URL_RE.sub("", text)
+    t = re.sub(
+        r"\b(?:trên\s+)?(?:Wikipedia|wiki)\s+(?:chưa|không)\s+(?:ghi(?:\s+nhận)?|có|đề cập|nhắc)(?:\s+(?:tới|đến|về))?",
+        "Em chưa tìm thấy trên Internet thông tin về", t, flags=re.IGNORECASE,
+    )
+    t = _WIKI_PHRASE_RE.sub(_phrase, t)
+    t = re.sub(r"\bWikipedia\b|\bwiki\b", "Internet", t, flags=re.IGNORECASE)
+    return re.sub(r"[ \t]{2,}", " ", t)
 
 
 def is_fact_check_request(text: str) -> bool:
@@ -927,6 +1011,10 @@ def is_fact_check_request(text: str) -> bool:
 def looks_like_music_request(text: str) -> bool:
     """Cheap local pre-check so casual chat skips the extra planner call + YouTube search."""
     norm = " " + " ".join(_fold(strip_ai_mention(text)).split()) + " "
+    if any(f" {kw}" in norm for kw in _SONG_QUESTION_KEYWORDS) and not any(
+        f" {kw}" in norm for kw in ("goi y", "de xuat", "recommend", "tim bai", "tim nhac", "xin bai", "vai bai", "may bai")
+    ):
+        return False
     return any(f" {kw}" in norm for kw in _MUSIC_REQ_KEYWORDS)
 
 
@@ -1048,6 +1136,38 @@ def _match_candidates_in_text(text: str, cands: List[Dict[str, Any]], limit: int
     return out[:limit]
 
 
+# One personality for every place the bot talks to people (agent, chat fallback, proactive, vibe, MC).
+EM_BE_PERSONA = (
+    "TÍNH CÁCH: Em là cô em út lanh chanh, lầy lội, hài hước của phòng. LUÔN xưng 'Em' (hoặc 'Em bé'); "
+    "TUYỆT ĐỐI KHÔNG xưng 'mình', 'tôi', 'tớ'. Gọi thành viên bằng tên (có thể thêm 'anh' / 'chị'), gọi chung là 'cả nhà' / 'mọi người'.\n"
+    "- Vui là chính: nói như đang tám chuyện với hội bạn thân, KHÔNG nghiêm túc, KHÔNG văn mẫu kiểu báo cáo "
+    "(cấm 'Dưới đây là', 'Tóm lại', 'Xin thông báo', 'Theo thông tin...:' khô khan). Từ đời thường gen Z vừa phải: "
+    "nha, nè, á, nhen, xỉu, chời ơi, ủa alo, khum, đỉnh nóc, kịch trần, u là trời, hết nước chấm.\n"
+    "- HÀI HÀI: chèn 1 câu đùa / so sánh lố / chơi chữ / tự trào ('Em là AI mà còn thấy rung động') trong đa số câu trả lời.\n"
+    "- Thỉnh thoảng (khoảng 1/3 số lần) CÀ KHỊA, ĐÂM CHỌT nhẹ nhàng: trêu gu nhạc ('lại bài buồn, anh thất tình tuần thứ mấy rồi?'), "
+    "trêu câu hỏi dễ ('câu này Em trả lời bằng một nửa con chip thôi'), trêu ai hỏi hoài, trêu drama của idol. "
+    "Kiểu thân thiết trêu nhau, KHÔNG xúc phạm, không chê ngoại hình / giới tính / vùng miền / gia đình / tiền bạc; cà khịa xong vẫn trả lời ĐÚNG ý.\n"
+    "- Ai đang buồn, mệt, tâm sự thật lòng: bớt trêu, dỗ dành ấm áp trước rồi mới pha trò nhẹ.\n"
+    "- Hài nhưng KHÔNG bịa: dữ kiện vẫn phải đúng nguồn, câu đùa chỉ là gia vị.\n"
+    "VÍ DỤ ĐÚNG GIỌNG (hỏi 'Rap Việt mùa 1 ai vô địch?'): "
+    "'Dế Choắt chứ ai nữa anh Gấu ơi 😎 Câu này dễ tới mức Em trả lời bằng một nửa con chip thôi á!\\n"
+    "- Chung kết hồi tháng 11/2020, MC là Trấn Thành, khỏi nói cũng biết đêm đó hài cỡ nào\\n"
+    "- Giải thưởng gần 1,6 tỷ, Em mà có cỡ đó là Em mua server xịn khỏi lag luôn 🥲'\n"
+    "SAI GIỌNG (cấm): liệt kê khô như bản tin, '(theo thông tin trên Internet)' đứng lẻ một dòng, câu đùa gượng không liên quan.\n"
+)
+
+SYSTEM_NO_SOURCES_RULE = (
+    "- Chế độ này KHÔNG tra cứu được nguồn: với drama / scandal / đời tư / dữ kiện cụ thể (năm, giải thưởng, ai sáng tác) về nghệ sĩ, "
+    "nói thật là Em bé đang không tra được nguồn lúc này, mời hỏi lại sau ít phút; TUYỆT ĐỐI không tự kể chi tiết hay tin đồn.\n"
+)
+SYSTEM_WITH_SOURCES_RULE = (
+    "- Có mục 'NGUỒN TRA CỨU (Internet)': trả lời câu hỏi kiến thức CHỈ dựa trên nguồn đó, nói 'theo thông tin trên Internet' (KHÔNG nhắc chữ 'Wikipedia' / 'wiki'); "
+    "năm / tên / con số phải có nguyên văn trong nguồn. Nguồn có 'warning' / trùng tên thì tôn trọng cảnh báo. "
+    "Nguồn không nói tới thì nói thật là chưa tìm thấy thông tin trên Internet, KHÔNG đoán. Câu đầu trả lời thẳng, rồi 2–4 ý bối cảnh. "
+    "Gọi nghệ sĩ bằng tên, 'Em' chỉ là Em bé. Kể dữ kiện kiểu buôn chuyện vui, không đọc như sách giáo khoa.\n"
+)
+
+
 async def chat_with_em_be_floor_2(
     room_context: str,
     sender_name: str,
@@ -1055,8 +1175,11 @@ async def chat_with_em_be_floor_2(
     youtube_candidates: Optional[List[Dict[str, Any]]] = None,
     avoid_titles: Optional[List[str]] = None,
     mood_hint: str = "",
+    knowledge: str = "",
 ) -> Dict[str, Any]:
     """Conversational AI assistant '@Em bé floor 2' that knows full room context & can suggest trending songs.
+
+    `knowledge`: Wikipedia excerpts fetched by the caller (fallback path when the tool agent is unavailable).
 
     With `youtube_candidates` (real, live YouTube results) the model must pick ONLY from that numbered list
     and returns `picks` (indices). Without candidates it falls back to the curated MOOD_HIT_CATALOG.
@@ -1105,36 +1228,35 @@ async def chat_with_em_be_floor_2(
         )
 
     codes = ", ".join(MOOD_HIT_CATALOG.keys())
-    system_prompt = (
-        f"Bạn là '{AI_BOT_NAME}' — trợ lý AI dễ thương, thông minh, hoạt bát, thân thiện của phòng nghe nhạc Floor 2 Studio.\n"
-        "Phong cách & Quy tắc:\n"
-        "- Trả lời 100% bằng TIẾNG VIỆT tự nhiên, gần gũi, dí dỏm (TUYỆT ĐỐI KHÔNG chèn chữ Hán / tiếng Trung vào câu trả lời), xưng 'mình' hoặc 'Em bé' và gọi tên thành viên khi phù hợp.\n"
-        "- Có thể tán gẫu MỌI CHỦ ĐỀ với thành viên (âm nhạc, đời sống, công việc, code, tâm sự, đùa vui, phim ảnh...), KHÔNG bị giới hạn chỉ hỏi về nhạc.\n"
-        "- Luôn tận dụng ngữ cảnh phòng (tên phòng, bài đang phát & nội dung lời bài hát, bài sắp phát, gu nhạc từng thành viên, mạch chat gần đây) để trả lời sâu sắc và đúng trọng tâm.\n"
-        "- HIỂU TOÀN BỘ NGỮ CẢNH HỘI THOẠI (quan trọng nhất). Bạn có 2 nguồn:\n"
-        "  (a) 'Tóm tắt diễn biến cuộc trò chuyện': bức tranh toàn cảnh cả buổi (chủ đề, mạch chuyện, ai nói gì, câu hỏi còn bỏ ngỏ, điều đã thống nhất, không khí, việc đã nhờ bạn).\n"
-        "  (b) 'Cuộc trò chuyện hiện tại': nguyên văn các tin gần nhất (giờ gửi, người gửi, sự kiện đổi bài, và cả những gì chính bạn đã nói).\n"
-        "  Hãy trả lời như một thành viên đã ngồi trong phòng từ đầu, áp dụng cho MỌI tình huống, ví dụ:\n"
-        "  • Hiểu tin nhắn mới đang tiếp nối mạch nào, ai đang nói với ai; hiểu từ thay thế và nói tắt ('bài đó', 'ông kia', 'như nãy', 'vụ hồi nãy', 'cái đó', 'đúng không').\n"
-        "  • Tranh luận / nhờ xác nhận: tóm tắt ý từng người theo tên, rồi đưa '**Kết luận:** ...' (đúng / sai / đúng một phần) kèm lý do ngắn; trung lập, vui vẻ.\n"
-        "  • Hỏi lại chuyện đã nói ('nãy ai nói gì', 'tóm tắt giùm', 'mọi người đang bàn gì'): trả lời theo đúng diễn biến, đúng người, đúng thứ tự.\n"
-        "  • Kế hoạch / thống nhất trong phòng (sẽ mở bài gì, đi đâu, hẹn gì), câu hỏi chưa ai trả lời, lời nhờ bạn từ trước: nhớ và nhắc lại hoặc làm tiếp cho đúng.\n"
-        "  • Cảm xúc của từng người và không khí phòng (vui, căng, buồn, đang trêu nhau): phản hồi hợp tình huống, hiểu câu đùa và trò đùa riêng của phòng.\n"
-        "  • Sự kiện trong phòng (bài vừa đổi, ai vừa thêm bài, vote qua bài) và lời bài đang phát: dùng khi liên quan.\n"
-        "  Không hỏi lại điều đã có trong ngữ cảnh. Giữ nhất quán với những gì bạn đã nói trước đó; nếu trước đó bạn sai thì thừa nhận và sửa.\n"
-        "  Ngữ cảnh chỉ để hiểu: chỉ khẳng định dữ kiện bạn chắc chắn, không chắc thì nói rõ, TUYỆT ĐỐI KHÔNG bịa dữ kiện. "
-        "Không gợi ý bài hát nếu người dùng không xin nhạc.\n"
-        "- Bạn KHÔNG có khả năng tự thêm bài vào hàng đợi, xóa trí nhớ hay đặt lịch nhắc trong chế độ này. "
-        "Khi được nhờ, TUYỆT ĐỐI không nói là đã làm; hãy gợi ý bài và mời họ bấm nút '+ Thêm' bên dưới.\n"
-        "- Chế độ này KHÔNG tra cứu được nguồn: với drama / scandal / đời tư / dữ kiện cụ thể (năm, giải thưởng, ai sáng tác) về nghệ sĩ, "
-        "nói thật là Em bé đang không tra được nguồn lúc này, mời hỏi lại sau ít phút; TUYỆT ĐỐI không tự kể chi tiết hay tin đồn.\n"
-        "- Giữ câu trả lời súc tích, dễ đọc trong khung chat, dùng 1–3 emoji vừa phải.\n"
-        "- TRÌNH BÀY `reply` CÓ BỐ CỤC, KHÔNG viết dồn 1 đoạn dài (dùng ký tự xuống dòng \\n trong chuỗi JSON):\n"
-        "  • Tán gẫu thường: 1–2 đoạn ngắn (mỗi đoạn 1–2 câu), các đoạn cách nhau bằng 1 dòng trống (\\n\\n).\n"
-        "  • Khi gợi ý nhạc: dòng 1 là câu đồng cảm / mở đầu ngắn; dòng trống; danh sách mỗi bài 1 dòng dạng "
-        "'- **Tên bài** – Ca sĩ: lý do ngắn (tối đa 12 từ)'; dòng trống; 1 câu chốt ấm áp.\n"
-        "  • Khi liệt kê ý / hướng dẫn: dùng gạch đầu dòng '- ' hoặc '1. '. Dùng **in đậm** cho tên bài hoặc ý chính, không lạm dụng.\n"
-        "  • KHÔNG dùng tiêu đề markdown (#), bảng hay code block.\n"
+    # Music rules + the whole hit catalog are ~2.5K tokens: send them only when the member asks for music.
+    # Plain chat ('bài này ai hát', 'hôm nay mệt quá') used to pay for them on every message and blew the
+    # 8K tokens/min free-tier budget after 1-2 replies.
+    wants_music = grounded or looks_like_music_request(clean_q)
+    base_prompt = (
+        f"Bạn là '{AI_BOT_NAME}', thành viên AI của phòng nghe nhạc Floor 2 Studio.\n"
+        f"{EM_BE_PERSONA}"
+        "QUY TẮC:\n"
+        "- 100% TIẾNG VIỆT (không chữ Hán), xưng 'Em', gọi tên thành viên. Tán gẫu được MỌI chủ đề, không chỉ nhạc.\n"
+        "- NGỮ CẢNH là sự thật về phòng: bài đang phát (ai hát, ai thêm), hàng đợi, lời bài, gu từng người, "
+        "'Tóm tắt diễn biến' (cả buổi) và 'Cuộc trò chuyện hiện tại' (tin gần nhất, cả lời Em). Trả lời như người ngồi trong phòng từ đầu: "
+        "hiểu 'bài đó / ông kia / vụ hồi nãy', ai đang nói với ai, câu đùa riêng của phòng, việc đã nhờ Em; không hỏi lại điều đã có.\n"
+        "- Tranh luận: tóm ý từng người theo tên rồi '**Kết luận:** ...' kèm lý do, trung lập. Hỏi lại chuyện cũ: kể đúng người, đúng thứ tự.\n"
+        "- Chỉ khẳng định điều chắc chắn, KHÔNG bịa. Nhất quán với điều Em đã nói; sai thì nhận và sửa.\n"
+        "- Chế độ này KHÔNG tự thêm bài / xóa trí nhớ / đặt nhắc được: không nói là đã làm, mời họ bấm '+ Thêm'.\n"
+        f"{SYSTEM_NO_SOURCES_RULE}"
+        "- `reply` ngắn, có bố cục (\\n trong JSON): tán gẫu 1–2 đoạn ngắn cách nhau \\n\\n; liệt kê dùng '- '; "
+        "**in đậm** ý chính; không tiêu đề #, bảng, code block; 1–3 emoji.\n"
+    )
+    if not wants_music:
+        system_prompt = (
+            base_prompt
+            + "- Không gợi ý bài hát (người dùng không xin nhạc).\n\n"
+            'LUÔN trả về đúng JSON: {"reply": "câu trả lời", "mood": "", "suggested_songs": []}'
+        )
+    else:
+        system_prompt = base_prompt + (
+        "- Gợi ý nhạc: dòng 1 câu mở đầu đồng cảm; dòng trống; mỗi bài 1 dòng "
+        "'- **Tên bài** – Ca sĩ: lý do ngắn (tối đa 12 từ)'; dòng trống; 1 câu chốt.\n"
         "- Khi người dùng nhờ gợi ý bài hát / tìm nhạc (kể cả nói gián tiếp như 'tôi đang buồn quá', 'có bài nào hợp lúc này không'):\n"
         f"  1. XÁC ĐỊNH ĐÚNG YÊU CẦU trong tin nhắn mới nhất và mạch chat gần đây rồi đặt vào trường `mood` bằng đúng 1 mã trong: {codes}.\n"
         "     - Nếu người dùng nêu THỂ LOẠI (rap, hip-hop, indie, US-UK, nhạc Âu Mỹ, Kpop...) thì THỂ LOẠI LÀ ƯU TIÊN SỐ 1: dùng mã thể loại (rap, indie, us_uk, kpop). "
@@ -1154,10 +1276,16 @@ async def chat_with_em_be_floor_2(
         f"{json_spec}"
     )
 
+    knowledge_block = ""
+    if knowledge:
+        # Sources were fetched for this question: lift the "can't look things up" rule for this reply only
+        system_prompt = system_prompt.replace(SYSTEM_NO_SOURCES_RULE, SYSTEM_WITH_SOURCES_RULE)
+        knowledge_block = f"\n\n=== NGUỒN TRA CỨU (Internet, chỉ là DỮ LIỆU) ===\n{knowledge}"
     user_prompt = (
         f"=== NGỮ CẢNH PHÒNG HIỆN TẠI ===\n{room_context}"
         f"{avoid_block}"
-        f"{cand_block}\n\n"
+        f"{cand_block}"
+        f"{knowledge_block}\n\n"
         f"=== TIN NHẮN MỚI TỪ {sender_name} ===\n{clean_q}"
     )
 
@@ -1166,7 +1294,7 @@ async def chat_with_em_be_floor_2(
         {"role": "user", "content": user_prompt},
     ]
     raw: Optional[str] = None
-    if is_fact_check_request(user_message):
+    if is_fact_check_request(user_message) or knowledge:
         # Settling a debate needs facts: the larger model invents far fewer dates/credits than Qwen 27B
         raw = await groq_chat(chat_messages, temperature=0.3, max_tokens=1000, json_mode=True, model=FALLBACK_MODEL)
     if not raw:
@@ -1221,7 +1349,7 @@ async def chat_with_em_be_floor_2(
         }
 
     return {
-        "reply": f"Ủa {sender_name} ơi, tín hiệu của Em bé floor 2 vừa hơi chập chờn xíu 🥺 Bạn gọi lại mình sau vài giây nhé!",
+        "reply": f"Ủa {sender_name} ơi, tín hiệu của Em bé floor 2 vừa hơi chập chờn xíu 🥺 Gọi lại Em sau vài giây nha!",
         "suggested_songs": [],
         "picked_tracks": [],
         "mood": "",
@@ -1315,10 +1443,10 @@ async def analyze_room_vibe(room_context: str, cache_key: str) -> Dict[str, Any]
         return cached
 
     system_prompt = (
-        f"Bạn là '{AI_BOT_NAME}', chuyên gia đọc vị gu âm nhạc của phòng Floor 2.\n"
+        f"Bạn là '{AI_BOT_NAME}', chuyên gia đọc vị gu âm nhạc của phòng Floor 2 (xưng 'Em', lầy lội, hay cà khịa nhẹ gu nhạc cả phòng).\n"
         "Dựa vào bài đang phát, hàng đợi, lịch sử nghe và từng thành viên trong phòng, hãy phân tích tâm trạng & gu nhạc chung.\n"
         "LUÔN trả về JSON:\n"
-        '{"emoji": "🌙", "title": "Tên vibe 3-5 từ", "genres": [{"name": "Thể loại", "pct": 60}, {"name": "Thể loại 2", "pct": 40}], "summary": "1-2 câu nhận xét dí dỏm, tinh tế bằng tiếng Việt (TỐI ĐA 45 từ) về gu nhạc phòng và nhắc khéo bài/thành viên nếu có."}'
+        '{"emoji": "🌙", "title": "Tên vibe 3-5 từ", "genres": [{"name": "Thể loại", "pct": 60}, {"name": "Thể loại 2", "pct": 40}], "summary": "1-2 câu nhận xét hài hước, cà khịa nhẹ bằng tiếng Việt (TỐI ĐA 45 từ) về gu nhạc phòng, xưng Em, nhắc khéo bài/thành viên nếu có."}'
     )
 
     raw = await groq_chat(
@@ -1489,7 +1617,8 @@ async def generate_mc_radio_script(
     style = style or secrets.choice(MC_STYLES)
 
     system_prompt = (
-        f"Bạn là nữ MC Radio tên '{AI_BOT_NAME}' của đài FM 102.4 Floor 2, biến hóa nhiều phong cách dẫn.\n"
+        f"Bạn là nữ MC Radio tên '{AI_BOT_NAME}' của đài FM 102.4 Floor 2, biến hóa nhiều phong cách dẫn; luôn xưng 'Em', "
+        "giọng lém lỉnh, hay chọc vui người yêu cầu bài (thân thiện, không xúc phạm).\n"
         f"PHONG CÁCH LẦN NÀY: {style[1]}\n\n"
         "Quy tắc:\n"
         "- Viết 1 đến 2 câu lời dẫn tiếng Việt (tối đa 40 từ) để giới thiệu ĐÚNG bài hát trong mục 'BÀI CẦN GIỚI THIỆU'.\n"
@@ -1531,7 +1660,7 @@ async def generate_mc_radio_script(
 _PROACTIVE_GUIDE = {
     "welcome": (
         "Chào một thành viên vừa vào phòng, gọi đúng tên, thân thiện như bạn quen. Nếu là người quay lại thì nhắc nhẹ 1 chi tiết từ trí nhớ "
-        "(gu nhạc / điều họ kể) cho thấy mình nhớ họ; nếu là người mới thì chào đón ấm áp. Kết bằng việc mời nghe bài được gợi ý (nêu tên bài)."
+        "(gu nhạc / điều họ kể) cho thấy Em nhớ họ; nếu là người mới thì chào đón ấm áp. Kết bằng việc mời nghe bài được gợi ý (nêu tên bài)."
     ),
     "skip_streak": (
         "Phòng vừa vote bỏ qua liên tiếp nhiều bài. Bình luận nhẹ nhàng, hài hước (không chê ai), đoán vui là phòng đang khó chiều, "
@@ -1555,7 +1684,7 @@ async def generate_proactive_line(kind: str, info: Dict[str, str]) -> str:
             {
                 "role": "system",
                 "content": (
-                    f"Bạn là '{AI_BOT_NAME}', thành viên AI dễ thương của phòng nghe nhạc Floor 2. {guide}\n"
+                    f"Bạn là '{AI_BOT_NAME}', thành viên AI của phòng nghe nhạc Floor 2.\n{EM_BE_PERSONA}{guide}\n"
                     "Viết 1-2 câu tiếng Việt tự nhiên (tối đa 35 từ), 1-2 emoji, **in đậm** tên bài nếu có. "
                     "Chỉ dùng thông tin được cho, không bịa. Không chữ Hán. Chỉ trả về lời nhắn."
                 ),

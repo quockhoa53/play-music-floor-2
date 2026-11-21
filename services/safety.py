@@ -123,7 +123,47 @@ async def assess_injection(text: str, api_key: Optional[str] = None) -> Dict[str
     }
 
 
+# ---------------------------------------------------------------------------------------------------
+# "Add to queue" vs "suggest": in Vietnamese 'cho anh thêm (vài) bài của X' means "show me more songs",
+# not "put them in the shared queue". Only an explicit command touches the queue; everything else gets
+# suggestion cards with a '+ Thêm' button (a wrong suggestion costs nothing, a wrong add annoys the room).
+# ---------------------------------------------------------------------------------------------------
+_PLAY_VERB_RE = re.compile(
+    # 'bài đang phát' / 'đang mở' describe the current song, they are not commands
+    r"((?<!đang )(?<!dang )(?<!vừa )(?<!vua )\b(mở|mo|phát|phat|bật|play|add)\b(?! (nhạc )?(gì|gi|nào|nao)\b)|"
+    r"xếp (vào|hàng)|xep (vao|hang)|"
+    r"cho vào (hàng đợi|queue|list)|cho vao (hang doi|queue)|\bqueue\b|hàng đợi|hang doi|"
+    r"cho (cả|ca) phòng nghe|cho (cả|ca) phong nghe)",
+    re.IGNORECASE,
+)
+# 'thêm ... vào (hàng đợi)' / 'thêm giùm bài X'
+_ADD_INTO_RE = re.compile(r"\b(thêm|them)\b.{0,60}\b(vào|vao)\b", re.IGNORECASE)
+_ADD_TITLE_RE = re.compile(  # case-sensitive: a capitalised / quoted title right after 'thêm (giùm) bài'
+    r"\b(?:[Tt]hêm|[Tt]hem)\s+(?:(?:giùm|giúp|dùm|hộ|gium|giup|dum)\s+)?(?:bài|bai|ca khúc)\s+"
+    r"(?!(?:của|cua|nữa|nua|khác|khac|hay|giống|giong|mới|moi|nào|nao|gì|gi)\b)[\"“'A-ZĐÀ-Ỹ0-9]"
+)
+# Suggestion phrasing: 'cho anh thêm vài bài của X', 'thêm mấy bài nữa', 'gợi ý', 'có bài nào'
+_SUGGEST_RE = re.compile(
+    r"(gợi ý|goi y|đề xuất|de xuat|recommend|có bài nào|co bai nao|bài nào hay|"
+    r"\b(thêm|them)\s+(vài|vai|mấy|may|những|nhung|các|cac|nhiều|nhieu|\d+)?\s*(bài|bai|ca khúc)\s+(của|cua|nữa|nua|khác|khac|hay|giống|giong)|"
+    r"\b(thêm|them)\s+(vài|vai|mấy|may|những|nhung|các|cac|nhiều|nhieu)\s+(bài|bai))",
+    re.IGNORECASE,
+)
+
+
+def wants_queue_add(text: str) -> bool:
+    """True only for an explicit 'put it in the queue' command (mở / phát / bật / thêm ... vào / thêm bài <Tên>)."""
+    t = text or ""
+    if _PLAY_VERB_RE.search(t) or _ADD_INTO_RE.search(t):
+        return True
+    if _SUGGEST_RE.search(t):
+        return False
+    return bool(_ADD_TITLE_RE.search(t))
+
+
 def action_allowed(tool_name: str, current_message: str) -> bool:
     """Server-side gate: side-effect tools only when the current message actually asks for them."""
+    if tool_name == "add_song_to_queue":
+        return wants_queue_add(current_message)
     pat = ACTION_INTENT_PATTERNS.get(tool_name)
     return True if pat is None else bool(pat.search(current_message or ""))

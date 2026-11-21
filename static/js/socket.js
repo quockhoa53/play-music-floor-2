@@ -12,8 +12,10 @@ class RoomSocket {
         this.listeners = {};
         this.reconnectTimer = null;
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 10;
+        // A dropped connection is never "leaving": keep retrying (backoff capped at 15s) until it works
+        this.maxReconnectAttempts = Infinity;
         this.manualClose = false;
+        this.hasJoined = false;
         this.sessionRefresher = null;
     }
 
@@ -68,6 +70,7 @@ class RoomSocket {
 
         this.ws.onopen = () => {
             this.isConnected = true;
+            this.hasJoined = true;
             this.reconnectAttempts = 0;
             this.startHeartbeat();
             this.trigger('connected');
@@ -117,6 +120,13 @@ class RoomSocket {
                 return;
             }
             if (event.code === 4029) {
+                // While RE-connecting (tab woke up, network back) a burst of attempts can hit the per-IP limit:
+                // wait and retry instead of throwing the member back to the lobby
+                if (this.hasJoined) {
+                    this.reconnectAttempts = Math.max(this.reconnectAttempts, 6);
+                    this.scheduleReconnect();
+                    return;
+                }
                 this.trigger('rate_limited', { reason: event.reason || 'Quá nhiều kết nối đồng thời' });
                 return;
             }
@@ -136,7 +146,7 @@ class RoomSocket {
             return;
         }
 
-        const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
+        const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 15000);
         this.reconnectAttempts++;
         this.reconnectTimer = setTimeout(async () => {
             if (this.manualClose || !this.roomId) return;
@@ -270,6 +280,7 @@ class RoomSocket {
      */
     disconnect() {
         this.manualClose = true;
+        this.hasJoined = false;
         this.stopHeartbeat();
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.ws) {
@@ -291,11 +302,17 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('online', () => window.roomSocket.ensureConnected());
 window.addEventListener('focus', () => window.roomSocket.ensureConnected());
 
-// Closing the tab / navigating away (not bfcache) = really leaving the room
+// Closing the tab / navigating away (not bfcache) = really leaving the room.
+// The socket may already be cut (background tab), so also send an HTTP beacon: browsers deliver it after unload.
 window.addEventListener('pagehide', (event) => {
     if (event.persisted) return;
     const s = window.roomSocket;
-    if (s && s.ws && s.ws.readyState === WebSocket.OPEN && !s.manualClose) {
+    if (!s || s.manualClose || !s.roomId || !s.sessionToken) return;
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) {
         try { s.ws.send(JSON.stringify({ action: 'leave' })); } catch (_) {}
     }
+    try {
+        const body = new Blob([JSON.stringify({ token: s.sessionToken })], { type: 'application/json' });
+        navigator.sendBeacon(`/api/rooms/${encodeURIComponent(s.roomId)}/leave`, body);
+    } catch (_) {}
 });

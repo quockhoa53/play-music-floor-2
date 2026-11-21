@@ -2104,20 +2104,28 @@ function initPlayerListeners() {
         progressBar.addEventListener('change', finishScrub);
     }
 
+    const renderMuteIcon = (isMuted) => {
+        if (!muteBtn) return;
+        muteBtn.innerHTML = isMuted
+            ? `<svg class="w-4 h-4 text-rose-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/><path stroke-linecap="round" stroke-linejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"/></svg>`
+            : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>`;
+    };
+
     if (volumeSlider) {
         volumeSlider.value = window.syncPlayer.volume;
         window.syncPlayer.updateVolumeSliderFill();
         volumeSlider.addEventListener('input', (e) => {
-            window.syncPlayer.setVolume(e.target.value);
+            const wasMuted = window.syncPlayer.isMuted;
+            // fromUser=true: dragging the slider up is the only automatic way to lift your own mute
+            window.syncPlayer.setVolume(e.target.value, true);
+            if (wasMuted !== window.syncPlayer.isMuted) renderMuteIcon(window.syncPlayer.isMuted);
         });
     }
 
     if (muteBtn) {
+        renderMuteIcon(window.syncPlayer.isMuted);  // a member who muted last time sees it right away
         muteBtn.onclick = () => {
-            const isMuted = window.syncPlayer.toggleMute();
-            muteBtn.innerHTML = isMuted
-                ? `<svg class="w-4 h-4 text-rose-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/><path stroke-linecap="round" stroke-linejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"/></svg>`
-                : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>`;
+            renderMuteIcon(window.syncPlayer.toggleMute());
         };
     }
 

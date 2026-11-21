@@ -68,6 +68,41 @@ def estimate_tokens(payload_messages: List[Dict[str, Any]], max_tokens: int, too
     return int(chars / CHARS_PER_TOKEN) + int(max_tokens or 0)
 
 
+REQUEST_TOKEN_CAP = 7600  # Groq free tier rejects (413) any single request whose prompt + max_tokens > 8000 TPM
+
+
+def fit_to_budget(
+    messages: List[Dict[str, Any]], max_tokens: int, tools: Optional[List[Dict[str, Any]]] = None,
+    cap: int = REQUEST_TOKEN_CAP,
+) -> List[Dict[str, Any]]:
+    """Shrink a request that would exceed the per-request cap by cutting the MIDDLE of the longest user/tool
+    message (room context: the head has the current song, the tail has the latest chat). System prompts and
+    the final message are kept intact. Returns a new list; the original is not modified."""
+    est = estimate_tokens(messages, max_tokens, tools)
+    if est <= cap:
+        return messages
+    out = [dict(m) for m in messages]
+    for _ in range(4):
+        over_chars = int((estimate_tokens(out, max_tokens, tools) - cap) * CHARS_PER_TOKEN) + 200
+        if over_chars <= 200:
+            break
+        candidates = [
+            (len(str(m.get("content") or "")), i) for i, m in enumerate(out[:-1] if len(out) > 2 else out)
+            if m.get("role") in ("user", "tool") and isinstance(m.get("content"), str)
+        ]
+        if not candidates:
+            break
+        length, idx = max(candidates)
+        if length < 1500:
+            break
+        text = out[idx]["content"]
+        cut = min(over_chars, length - 1200)
+        head = int((length - cut) * 0.45)
+        tail = length - cut - head
+        out[idx]["content"] = text[:head] + "\n…(lược bớt cho gọn)…\n" + text[-tail:]
+    return out
+
+
 class ModelRateGuard:
     def __init__(self) -> None:
         self._usage: Dict[Tuple[int, str], Deque[Tuple[float, int]]] = {}
@@ -123,6 +158,13 @@ class ModelRateGuard:
             if dq[i][1] == int(est_tokens):
                 dq[i] = (dq[i][0], int(actual_tokens))
                 return
+
+    def release(self, key_idx: int, model: str, est_tokens: int, keep: int = 0) -> None:
+        """A request that failed before generating (400 / 5xx / network): give its reserved estimate back.
+
+        Without this, every failed attempt kept ~4-6K 'phantom' tokens for 60s, so one bad reply made the guard
+        report 'rate limited (50s)' for all keys although Groq had plenty of quota left."""
+        self.settle(key_idx, model, est_tokens, keep)
 
     def cool(self, key_idx: int, model: str, seconds: float) -> None:
         self._cooldown[(key_idx, model)] = max(self._cooldown.get((key_idx, model), 0.0), time.time() + seconds)
