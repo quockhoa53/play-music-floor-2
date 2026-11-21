@@ -265,6 +265,29 @@ for _t in AGENT_TOOLS:
     _fn["description"] = _SHORT_TOOL_DESC.get(_fn["name"], _fn["description"])
     for _prop in (_fn.get("parameters", {}).get("properties") or {}).values():
         _prop.pop("description", None)
+# The message talks ABOUT the song that is playing (no emotion list: any feeling / experience counts)
+SONG_REFERENCE_RE = re.compile(
+    r"\b(bài|bai|bài hát|bai hat|ca khúc|ca khuc|nhạc|nhac|giai điệu|giai dieu|beat|lời|loi|bản|"
+    r"đoạn|doan|câu|cau|giọng|giong|melody|drop|điệp khúc|diep khuc)\s*"
+    r"(này|nay|hiện tại|hien tai|đang phát|dang phat|đang mở|dang mo|đang nghe|dang nghe|đó|do|nãy|nay giờ|vừa rồi)\b",
+    re.IGNORECASE,
+)
+# ...but commands about it are not reactions ('qua bài này', 'thêm bài này', 'bỏ bài này')
+SONG_COMMAND_RE = re.compile(
+    r"\b(qua|skip|next|bỏ|bo|xóa|xoa|tắt|tat|dừng|dung|thêm|them|mở|mo|phát lại|replay|lặp|lap)\s+(bài|bai|nhạc|nhac)\b",
+    re.IGNORECASE,
+)
+SONG_REQUEST_RE = re.compile(
+    r"(gợi ý|goi y|đề xuất|tìm|tim|kiếm|kiem|bài nào|bai nao|bài gì|bai gi|giống|giong|tương tự|tuong tu|cùng gu|cung gu)",
+    re.IGNORECASE,
+)
+SONG_REACTION_RULE = (
+    "- Người gửi phản ứng / kể trải nghiệm về bài ĐANG PHÁT (bất kỳ cảm xúc nào: buồn, vui, nổi da gà, nhớ ai đó, muốn quẩy, "
+    "chán, khó hiểu, nghe hoài không chán...): get_song_lyrics('current'). Bắt đúng cảm xúc / trải nghiệm CỦA HỌ trước, "
+    "rồi nối nó với nội dung bài: trích 1–2 câu hát THẬT, câu chuyện / hình ảnh / thông điệp trong lời, vì sao bài gợi đúng cảm giác đó "
+    "(hoặc vì sao họ thấy chưa hợp). Đúng tên bài + ca sĩ đang phát, không lạc sang hàng đợi / bài khác. "
+    "Họ đang buồn / xúc động thì dỗ dành, không cà khịa; họ đang vui / chê thì được trêu nhẹ.\n"
+)
 # 'bài (hiện tại / đang phát / này) ai hát / tên gì / ai thêm': answered from the room state, not Wikipedia
 ROOM_ANSWERABLE_RE = re.compile(
     r"(bài|bài hát|ca khúc|nhạc)( hiện tại| đang phát| đang mở| này| đang nghe)?\b.{0,25}"
@@ -408,6 +431,17 @@ def detect_intents(text: str, ignore_names: Optional[List[str]] = None) -> set:
     found.discard("add")
     if wants_queue_add(t):
         found.add("add")
+    # ANY reaction to the song that is playing ('bài này bùn quá', 'beat này cuốn ghê', 'nghe bài này nhớ
+    # người yêu cũ', 'bài này khó hiểu'): the reply must come from the real lyrics, whatever the feeling is
+    if SONG_REFERENCE_RE.search(t) and not SONG_COMMAND_RE.search(t) and not (found & {"add", "facts", "memory", "remind"}):
+        from services.knowledge import extract_entities
+
+        found.add("lyrics")
+        # 'nghe bài này nhớ người yêu cũ' is a reaction, not artist gossip ('người yêu') nor a song request ('nghe bài')
+        if "drama" in found and not extract_entities(t, ignore_names):
+            found.discard("drama")
+        if "music" in found and not (_SUGGEST_RE.search(t) or SONG_REQUEST_RE.search(t)):
+            found.discard("music")
     elif _SUGGEST_RE.search(t) or re.search(r"(bài|bài hát|ca khúc|nhạc) (hát )?của", t, re.IGNORECASE):
         found.add("music")
     if is_fact_check_request(t):
@@ -466,7 +500,10 @@ _TOOL_RULES = {
         "('từng vướng', 'bị cho là'), nêu phản hồi của nghệ sĩ nếu có; không tin đồn, không kết luận ai có tội. "
         "Chuyện tình dục / ảnh, clip riêng tư bị phát tán / sức khỏe / con cái: chỉ nhắc chung 1 câu.\n"
     ),
-    "lyrics": "- Lời / ý nghĩa bài: get_song_lyrics ('current' = bài đang phát), trích câu thật rồi giải thích.\n",
+    "lyrics": (
+        "- Lời / ý nghĩa bài: get_song_lyrics ('current' = bài đang phát), trích câu thật rồi giải thích.\n"
+        f"{SONG_REACTION_RULE}"
+    ),
     "memory": "- 'Nhớ giùm' / kể điều lâu dài về bản thân → remember_fact; muốn bạn quên chính họ → forget_my_memory (không xóa giùm người khác).\n",
     "remind": "- Hẹn nhắc → schedule_reminder (tính giờ từ ngày giờ hiện tại ở đầu <room_context>).\n",
 }

@@ -3811,10 +3811,12 @@ function pickNaturalVietnameseFemaleVoice() {
         if (/hoaimy|hoai my/.test(n)) s += 30;
         if (/microsoft/.test(n)) s += 10;
         if (/an|linh|female|nữ|nu\b/.test(n)) s += 5;
-        if (/google/.test(n)) s -= 40;                       // robotic "chị Google" — last resort only
+        if (/google/.test(n)) s -= 40;                       // robotic "chị Google"
         if (/nam ?minh|male/.test(n)) s -= 60;               // male voices
         return s;
     };
+    // Fallback when ElevenLabs cannot be used: the best Vietnamese voice this browser has
+    // (Edge's natural HoaiMy first, Chrome's Google voice otherwise). Male voices only if nothing else exists.
     return voices.sort((a, b) => score(b) - score(a))[0];
 }
 

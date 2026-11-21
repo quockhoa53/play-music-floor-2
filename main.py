@@ -42,6 +42,7 @@ from services.ai import (
     generate_ai_dj_playlist,
     get_ai_stats,
     get_or_create_mc_intro,
+    elevenlabs_enabled,
     is_ai_mention,
     looks_like_music_request,
     plan_music_request,
@@ -178,12 +179,14 @@ async def _prewarm_mc_for_room(room: "Room") -> None:
     targets: List["Track"] = []
     if room.current_track:
         targets.append(room.current_track)
-    targets.extend(room.queue[:2])  # 2 Up-Next tracks so fast host skips still hit a ready intro
+    # 2 Up-Next tracks so fast host skips still hit a ready intro; only 1 with ElevenLabs (paid per character)
+    targets.extend(room.queue[: 1 if elevenlabs_enabled() else 2])
     if not targets:
         return
     for t in targets[:3]:
         try:
-            await get_or_create_mc_intro(room.id, t.to_dict(), build_mc_context(room, t))
+            # patient: built while the previous song plays, so wait out Edge's flaky retries for the real voice
+            await get_or_create_mc_intro(room.id, t.to_dict(), build_mc_context(room, t), patient=True)
         except Exception:
             pass
 

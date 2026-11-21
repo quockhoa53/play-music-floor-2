@@ -1964,6 +1964,13 @@ def test_agent_routing_and_quota_cooldown():
     assert detect_intents("goi y nhac buon di") == {"music"}
     assert detect_intents("nhac tui 9h hop nhe") == {"remind"}
     assert detect_intents("haha cuoi xiu") == set()
+    # Any reaction to the playing song (no emotion keyword list) reads its lyrics; commands / own mood do not
+    for reaction in ("bài này bùn quá", "beat này nghe muốn quẩy", "nghe bài này nhớ người yêu cũ",
+                     "giai điệu này nổi da gà", "bài này khó hiểu ghê"):
+        assert detect_intents(reaction) == {"lyrics"}, reaction
+    assert detect_intents("qua bài này đi") == set()
+    assert detect_intents("hôm nay buồn quá") == set()
+    assert detect_intents("bài này ai hát") == {"facts"}
     assert detect_intents("bat dau thoi") == set()
     assert detect_intents("quen roi") == set()
     for chat in ("hôm nay ăn gì ta", "nãy Thỏ nói gì nhỉ", "chào em nha", "kể chuyện cười đi"):

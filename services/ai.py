@@ -1241,6 +1241,10 @@ async def chat_with_em_be_floor_2(
         "'Tóm tắt diễn biến' (cả buổi) và 'Cuộc trò chuyện hiện tại' (tin gần nhất, cả lời Em). Trả lời như người ngồi trong phòng từ đầu: "
         "hiểu 'bài đó / ông kia / vụ hồi nãy', ai đang nói với ai, câu đùa riêng của phòng, việc đã nhờ Em; không hỏi lại điều đã có.\n"
         "- Tranh luận: tóm ý từng người theo tên rồi '**Kết luận:** ...' kèm lý do, trung lập. Hỏi lại chuyện cũ: kể đúng người, đúng thứ tự.\n"
+        "- Người gửi phản ứng / kể trải nghiệm về bài ĐANG PHÁT (bất kỳ cảm xúc nào): bắt đúng cảm xúc của họ trước, rồi nối với "
+        "nội dung bài dựa vào lời bài trong ngữ cảnh (trích câu hát thật, câu chuyện, thông điệp, vì sao bài gợi cảm giác đó); "
+        "đúng bài đang phát, không lạc sang hàng đợi. Họ buồn / xúc động thì dỗ dành, không cà khịa.\n"
+        "- Người gửi kể tâm trạng của CHÍNH HỌ (mệt, vui, thất tình...): đồng cảm với họ trước tiên; chỉ nhắc tới nhạc nếu thật sự hợp.\n"
         "- Chỉ khẳng định điều chắc chắn, KHÔNG bịa. Nhất quán với điều Em đã nói; sai thì nhận và sửa.\n"
         "- Chế độ này KHÔNG tự thêm bài / xóa trí nhớ / đặt nhắc được: không nói là đã làm, mời họ bấm '+ Thêm'.\n"
         f"{SYSTEM_NO_SOURCES_RULE}"
@@ -1839,16 +1843,108 @@ _edge_down_until: float = 0.0
 _mc_inflight: Dict[str, "asyncio.Task[Dict[str, Any]]"] = {}
 
 
-async def synthesize_mc_audio(text: str) -> Tuple[Optional[bytes], str]:
-    """Fast Vietnamese MC audio: race Edge HoaiMy (preferred, capped at a few seconds) against Google vi TTS.
+# The robotic Google translate voice ("chị Google") is OFF unless explicitly enabled: members asked for a real
+# female voice, and silence + subtitle beats a robot reading the intro.
+MC_ROBOT_VOICE_FALLBACK = os.getenv("MC_ROBOT_VOICE_FALLBACK", "0").strip().lower() in ("1", "true", "yes")
 
-    Edge TTS sometimes stalls or returns NoAudioReceived for minutes; waiting on its retries made the MC
-    start ~10-25s late. A circuit breaker skips Edge entirely while it is known to be failing.
+# ---------------------------------------------------------------------------------------------------
+# ElevenLabs: primary MC voice (fast ~0.6s, reliable). Free plan = premade voices only (library voices need a
+# paid plan), so the default is premade "Jessica" (playful, bright). Any failure falls back to Edge HoaiMy.
+# ---------------------------------------------------------------------------------------------------
+ELEVEN_VOICE_JESSICA = "cgSgspJ2msm6clMCkdW9"
+ELEVEN_VOICE_LABEL = "elevenlabs"
+_eleven_down_until: float = 0.0
+
+
+def _eleven_config() -> Tuple[str, str, str]:
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    voice = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    if len(voice) < 15:  # empty or a placeholder like '...'
+        voice = ELEVEN_VOICE_JESSICA
+    model = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5").strip() or "eleven_flash_v2_5"
+    return key, voice, model
+
+
+def elevenlabs_enabled() -> bool:
+    return bool(_eleven_config()[0])
+
+
+async def synthesize_elevenlabs_tts(text: str, timeout: float = 12.0) -> Optional[bytes]:
+    """MC line -> MP3 with ElevenLabs. A circuit breaker pauses it after quota / auth / rate-limit errors so
+    every intro does not wait on a call that cannot succeed (out of credits -> Edge until it resets)."""
+    global _eleven_down_until
+    key, voice, model = _eleven_config()
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if not key or not clean or time.time() < _eleven_down_until:
+        return None
+    try:
+        resp = await _get_tts_client().post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice}",
+            headers={"xi-api-key": key, "accept": "audio/mpeg", "Content-Type": "application/json"},
+            params={"output_format": "mp3_44100_128"},
+            json={
+                "text": clean[:600],  # credits are per character: MC lines are 1-2 sentences, never essays
+                "model_id": model,
+                "language_code": "vi",
+                "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.3, "use_speaker_boost": True},
+            },
+            timeout=timeout,
+        )
+    except Exception as exc:
+        telemetry.incr("tts.eleven.exception")
+        print(f"[tts elevenlabs] {type(exc).__name__} {exc}")
+        return None
+    telemetry.incr(f"tts.eleven.{resp.status_code}")
+    if resp.status_code == 200 and len(resp.content) > 1024:
+        return resp.content
+    body = resp.text[:300]
+    if resp.status_code in (401, 402, 403) or "quota" in body.lower():
+        _eleven_down_until = time.time() + 6 * 3600  # bad key / plan / out of credits: Edge for a while
+    elif resp.status_code == 429:
+        _eleven_down_until = time.time() + 60
+    print(f"[tts elevenlabs] HTTP {resp.status_code}: {body[:200]}")
+    return None
+
+
+async def synthesize_mc_audio(text: str, patient: bool = False) -> Tuple[Optional[bytes], str]:
+    """Vietnamese MC audio in the natural neural female voice (Edge HoaiMy).
+
+    Edge's free endpoint is flaky (NoAudioReceived several times in a row, ~7-9s when it works).
+    - patient=True (prewarm: the intro is built while the PREVIOUS song still plays, minutes ahead):
+      retry all prosody variants + clause-by-clause for up to ~25s, ignoring the circuit breaker.
+    - patient=False (on-demand, someone is waiting): one quick attempt.
+    Returns (None, "none") when no natural voice could be made: the client then shows the subtitle only.
     """
     global _edge_down_until
     clean_text = re.sub(r"\s+", " ", (text or "").strip())
     if not clean_text:
+        return None, "none"
+
+    # 1. ElevenLabs (real-sounding, ~0.6s) when configured. If it cannot be used (out of credits, bad key,
+    #    outage) the client reads the line with the browser's own voice, like before ElevenLabs.
+    if elevenlabs_enabled():
+        data = await synthesize_elevenlabs_tts(clean_text)
+        if data:
+            return data, ELEVEN_VOICE_LABEL
         return None, "browser"
+
+    # 2. No ElevenLabs configured: Edge HoaiMy (free, flaky)
+    if patient:
+        data = await synthesize_neural_female_tts(clean_text)
+        if data:
+            _edge_down_until = 0.0
+            return data, NEURAL_VOICE
+        if not MC_ROBOT_VOICE_FALLBACK:
+            return None, "none"
+
+    if not MC_ROBOT_VOICE_FALLBACK:
+        if time.time() < _edge_down_until:
+            return None, "none"
+        data = await _edge_tts_once(clean_text, "+0%", "+0Hz", timeout=10.0)
+        if data:
+            return data, NEURAL_VOICE
+        _edge_down_until = time.time() + 30.0
+        return None, "none"
 
     google_task = asyncio.create_task(synthesize_google_fallback_tts(clean_text))
     if time.time() >= _edge_down_until:
@@ -1879,6 +1975,7 @@ async def get_or_create_mc_intro(
     room_id: str,
     track: Dict[str, Any],
     room_context: str,
+    patient: bool = False,
 ) -> Dict[str, Any]:
     """Generate & cache expressive female Radio MC intro (script + MP3 audio_url).
 
@@ -1891,7 +1988,7 @@ async def get_or_create_mc_intro(
         return cached
     task = _mc_inflight.get(cache_key)
     if task is None or task.done():
-        task = asyncio.create_task(_build_mc_intro(room_id, track, room_context, track_uid, cache_key))
+        task = asyncio.create_task(_build_mc_intro(room_id, track, room_context, track_uid, cache_key, patient))
         _mc_inflight[cache_key] = task
         task.add_done_callback(lambda _t, k=cache_key: _mc_inflight.pop(k, None))
     return await asyncio.shield(task)
@@ -1903,6 +2000,7 @@ async def _build_mc_intro(
     room_context: str,
     track_uid: str,
     cache_key: str,
+    patient: bool = False,
 ) -> Dict[str, Any]:
     # Avoid repeating the previous intro's style back-to-back in this room
     last_style = _last_mc_style.get(room_id)
@@ -1911,7 +2009,7 @@ async def _build_mc_intro(
 
     script = await generate_mc_radio_script(room_context, track, style=style)
     # Always a Vietnamese voice (never let the browser fall back to an English voice)
-    audio_bytes, voice = await synthesize_mc_audio(script)
+    audio_bytes, voice = await synthesize_mc_audio(script, patient=patient)
 
     audio_url = None
     if audio_bytes:
@@ -1919,7 +2017,7 @@ async def _build_mc_intro(
         mc_audio_cache.set(audio_id, audio_bytes, ttl=1800)
         audio_url = f"/api/ai/mc-audio/{audio_id}"
     else:
-        voice = "browser"
+        voice = "none"
 
     result = {
         "track_uid": track_uid,
@@ -1930,5 +2028,5 @@ async def _build_mc_intro(
     }
     # Cache successful neural audio for 30 min; retry neural synthesis sooner if it failed
     # Keep any real Vietnamese audio long enough for a prewarmed Up-Next intro to still be ready at play time
-    mc_intro_cache.set(cache_key, result, ttl=1800 if voice == NEURAL_VOICE else (900 if audio_url else 30))
+    mc_intro_cache.set(cache_key, result, ttl=1800 if voice in (NEURAL_VOICE, ELEVEN_VOICE_LABEL) else (900 if audio_url else 30))
     return result

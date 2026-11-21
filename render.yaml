@@ -50,6 +50,12 @@ services:
         sync: false
       - key: GROQ_API_KEY_4
         sync: false
+      # Giọng MC: ElevenLabs (nhanh, giống người thật). Gói Free chỉ dùng được giọng premade -> Jessica.
+      # Hết credit / lỗi -> tự chuyển sang Edge HoaiMy -> chỉ hiện chữ (không dùng giọng robot Google)
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        value: "cgSgspJ2msm6clMCkdW9"
       # 1 = agent gpt-oss (công cụ, tra cứu, thêm bài); 0 = chỉ dùng pipeline Qwen cũ
       - key: AI_AGENT_ENABLED
         value: "1"
